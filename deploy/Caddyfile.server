@@ -1,0 +1,51 @@
+cskr.space {
+  encode zstd gzip
+
+  redir /ai-benchmark /ai-benchmark/ 308
+
+  handle_path /ai-benchmark/* {
+    reverse_proxy 172.17.0.1:8099
+  }
+
+  @mail_root path /mail
+  redir @mail_root /mail/ 308
+
+  handle_path /mail/* {
+    reverse_proxy 172.17.0.1:8080 {
+      header_up X-Forwarded-Prefix /mail
+    }
+  }
+
+  handle {
+    header {
+      Strict-Transport-Security "max-age=31536000; includeSubDomains"
+      X-Content-Type-Options "nosniff"
+      X-Frame-Options "DENY"
+      Referrer-Policy "strict-origin-when-cross-origin"
+      Permissions-Policy "camera=(), microphone=(), geolocation=()"
+      Content-Security-Policy "default-src 'self'; connect-src 'self' wss:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+      -Server
+    }
+    reverse_proxy frontend:80
+  }
+}
+
+analytics.cskr.space {
+  encode zstd gzip
+  reverse_proxy umami:3000
+}
+
+mail4.space, www.mail4.space {
+  encode zstd gzip
+
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    X-Content-Type-Options "nosniff"
+    X-Frame-Options "DENY"
+    Referrer-Policy "strict-origin-when-cross-origin"
+    Permissions-Policy "camera=(), microphone=(), geolocation=()"
+    -Server
+  }
+
+  reverse_proxy 172.17.0.1:18081
+}

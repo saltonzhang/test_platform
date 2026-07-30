@@ -1,0 +1,24 @@
+# Local secrets and databases
+.env
+.env.*
+!.env.production.example
+backend/.env
+backend/db.sqlite3
+
+# Sensitive database and API exports
+dataapi
+new_aibet
+test_aibetauto.sql
+new/
+
+# Dependencies and generated files
+**/node_modules/
+frontend/dist/
+**/__pycache__/
+*.py[cod]
+
+# OS and editor files
+.DS_Store
+**/.DS_Store
+.vscode/
+.idea/
