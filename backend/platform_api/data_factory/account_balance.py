@@ -7,7 +7,7 @@ from django.utils import timezone
 
 from ..executor import api_request_executor
 from ..models import Environment
-from ..services import get_login_parameter_names
+from ..services import get_login_parameter_names, target_login_failure_message
 
 
 class DataFactoryError(Exception):
@@ -89,7 +89,7 @@ def execute_account_balance(operator, password, environment_id, email, amount):
         request_encoding='multipart',
     )
     if not login.access_token:
-        raise DataFactoryError(f'后台登录失败：{login.message}')
+        raise DataFactoryError(target_login_failure_message(login.message))
 
     headers = {'Accept': 'application/json, text/plain, */*', 'X-Token': '', 'Content-Type': 'application/json'}
     user_id = _token_user_id(login.access_token)

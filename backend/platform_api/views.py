@@ -17,6 +17,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 
 from .constants import BUSINESS_MODULE_NAMES
 from .data_factory import DataFactoryError, execute_account_balance, push_order_result
+from .interface_import import InterfaceImportError, parse_fetch_text
 from .models import ApiInterface, AutomationModule, AutomationTask, AutomationTaskResult, DataFactoryExecution, Environment, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorTask, Role, User
 from .pagination import StandardPagination
 from .permissions import ActionPermissionMixin
@@ -122,8 +123,8 @@ class DataFactoryAccountBalanceView(APIView):
     def post(self, request):
         require_data_factory_permission(request)
         password = str(request.data.get('login_password', ''))
-        if not password or not request.user.check_password(password):
-            raise ValidationError({'login_password': '请输入当前平台密码'})
+        if not password:
+            raise ValidationError({'login_password': '请输入目标系统登录密码'})
         email = str(request.data.get('email', '')).strip().lower()
         if not email or '@' not in email:
             raise ValidationError({'email': '请输入有效邮箱'})
@@ -407,7 +408,7 @@ class AutomationModuleViewSet(ActionPermissionMixin, viewsets.ReadOnlyModelViewS
 class ApiInterfaceViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
     queryset = ApiInterface.objects.select_related('created_by').all()
     serializer_class = ApiInterfaceSerializer
-    action_permissions = {'list':'automation.view','retrieve':'automation.view','create':'automation.create','update':'automation.edit','partial_update':'automation.edit','destroy':'automation.delete'}
+    action_permissions = {'list':'automation.view','retrieve':'automation.view','create':'automation.create','update':'automation.edit','partial_update':'automation.edit','destroy':'automation.delete','batch_import':'automation.create'}
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -447,6 +448,32 @@ class ApiInterfaceViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
         self.get_object().delete()
         return success(message='接口删除成功')
 
+    @action(detail=False, methods=['post'], url_path='batch-import')
+    def batch_import(self, request):
+        try:
+            payloads = parse_fetch_text(request.data.get('text', ''), request.data.get('module_name', ''))
+        except InterfaceImportError as exc:
+            raise ValidationError(str(exc)) from exc
+
+        imported, skipped, failed = [], [], []
+        for index, payload in enumerate(payloads, start=1):
+            serializer = self.get_serializer(data=payload)
+            if serializer.is_valid():
+                item = self.perform_create(serializer)
+                imported.append({'index': index, 'name': serializer.data['name'], 'id': serializer.instance.id})
+                continue
+            message = serializer.errors
+            first_error = next(iter(message.values()), message) if isinstance(message, dict) and message else message
+            rendered = str(first_error[0] if isinstance(first_error, (list, tuple)) and first_error else first_error)
+            if '相同 URL 和请求参数' in rendered:
+                skipped.append({'index': index, 'name': payload['name'], 'message': '重复接口，已跳过'})
+            else:
+                failed.append({'index': index, 'name': payload['name'], 'message': rendered})
+        return success(
+            {'imported': imported, 'skipped': skipped, 'failed': failed, 'total': len(payloads)},
+            f'批量录入完成，成功 {len(imported)} 条，重复跳过 {len(skipped)} 条，失败 {len(failed)} 条',
+        )
+
 
 class AutomationTaskViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
     queryset = AutomationTask.objects.select_related('module', 'environment', 'owner').prefetch_related('modules', 'execution_details').all()
@@ -472,9 +499,7 @@ class AutomationTaskViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         login_password = request.data.get('login_password', '')
         if not login_password:
-            raise ValidationError({'login_password': '请输入当前平台密码'})
-        if not request.user.check_password(login_password):
-            raise ValidationError({'login_password': '当前平台密码不正确'})
+            raise ValidationError({'login_password': '请输入目标系统登录密码'})
         payload = request.data.copy()
         payload.pop('login_password', None)
         serializer = self.get_serializer(data=payload)
@@ -507,9 +532,12 @@ class AutomationTaskViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
     def run(self, request, pk=None):
         task = self.get_object()
         login_password = request.data.get('login_password', '')
-        if not login_password or not request.user.check_password(login_password):
-            raise ValidationError({'login_password': '请输入当前平台密码'})
-        execute_task(task, request.user, login_password)
+        if not login_password:
+            raise ValidationError({'login_password': '请输入目标系统登录密码'})
+        results = execute_task(task, request.user, login_password)
+        login_result = next((item for item in results if item.interface_name == '系统登录' and item.status == 'failed'), None)
+        if login_result:
+            raise ValidationError(login_result.response_message)
         return success(self.get_serializer(task).data, '任务执行完成')
 
     @action(detail=True, methods=['post'])
@@ -530,13 +558,13 @@ class AutomationTaskResultViewSet(ActionPermissionMixin, viewsets.ReadOnlyModelV
     def retry(self, request, pk=None):
         login_password = request.data.get('login_password', '')
         if not login_password:
-            raise ValidationError({'login_password': '请输入当前平台密码'})
-        if not request.user.check_password(login_password):
-            raise ValidationError({'login_password': '当前平台密码不正确'})
+            raise ValidationError({'login_password': '请输入目标系统登录密码'})
         try:
             result = retry_task_result(self.get_object(), request.user, login_password)
         except ValueError as exc:
             raise ValidationError(str(exc)) from exc
+        if result.status == 'failed' and result.interface_name == '系统登录':
+            raise ValidationError(result.response_message)
         return success(self.get_serializer(result).data, '接口重试完成')
 
 

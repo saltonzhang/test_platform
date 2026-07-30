@@ -7,7 +7,7 @@
         <el-form-item label="运行环境" prop="environment"><el-select v-model="form.environment" placeholder="请选择后台环境" style="width:100%"><el-option v-for="env in backendEnvironments" :key="env.id" :label="env.name" :value="env.id"/></el-select></el-form-item>
         <el-form-item label="会员邮箱" prop="email"><el-input v-model="form.email" placeholder="请输入会员邮箱"/></el-form-item>
         <el-form-item label="加款金额（Cash）" prop="amount"><el-input-number v-model="form.amount" :min="0.01" :max="1000000" :precision="2" controls-position="right" style="width:100%"/></el-form-item>
-        <el-form-item label="当前平台密码" prop="login_password"><el-input v-model="form.login_password" type="password" show-password autocomplete="current-password"/></el-form-item>
+        <el-form-item label="目标系统登录密码" prop="login_password"><el-input v-model="form.login_password" type="password" show-password autocomplete="off"/></el-form-item>
       </el-form>
       <el-button type="primary" :loading="submitting" @click="submit">创建并审批加款</el-button>
     </div>
@@ -26,7 +26,7 @@ const props=defineProps<{environments:Environment[]}>()
 const emit=defineEmits<{executed:[]}>()
 const submitting=ref(false),formRef=ref<FormInstance>()
 const form=reactive({environment:0,email:'',amount:0,login_password:''})
-const rules:FormRules={environment:[{required:true,message:'请选择后台环境'}],email:[{required:true,message:'请输入会员邮箱'},{type:'email',message:'邮箱格式不正确'}],amount:[{required:true,message:'请输入加款金额'}],login_password:[{required:true,message:'请输入当前平台密码'}]}
+const rules:FormRules={environment:[{required:true,message:'请选择后台环境'}],email:[{required:true,message:'请输入会员邮箱'},{type:'email',message:'邮箱格式不正确'}],amount:[{required:true,message:'请输入加款金额'}],login_password:[{required:true,message:'请输入目标系统登录密码'}]}
 const backendEnvironments=computed(()=>props.environments.filter(item=>item.login_url.includes('/api/v2/login')))
 watch(backendEnvironments,environments=>{if(environments.length&&!environments.some(item=>item.id===form.environment))form.environment=environments[0].id},{immediate:true})
 

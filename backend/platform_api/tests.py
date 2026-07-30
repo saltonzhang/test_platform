@@ -1,4 +1,5 @@
 import json
+from decimal import Decimal
 from unittest.mock import patch
 
 from django.urls import reverse
@@ -7,6 +8,7 @@ from rest_framework.test import APITestCase
 
 from .models import ApiInterface, AutomationModule, AutomationTask, AutomationTaskResult, Environment, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorTask, Role, User
 from .executor import api_request_executor
+from .interface_import import parse_fetch_text
 from .services import build_parameter_variables, build_request_url, execute_task, replace_parameter_variables
 
 
@@ -303,8 +305,33 @@ class PlatformApiTests(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_batch_import_fetch_text_parses_and_skips_duplicates(self):
+        text = '''fetch("https://api-test.helix.city/api/v1/member/getUnreadCount?scope=all", {
+  "headers": {
+    "authorization": "sensitive-token",
+    "accept": "application/json, text/plain, */*"
+  },
+  "method": "GET",
+  "body": null
+});
+fetch("https://api-test.helix.city/api/v1/member/getUnreadCount?scope=all", {
+  "headers": {"authorization": "another-token"},
+  "method": "GET"
+});'''
+        parsed = parse_fetch_text(text)
+        self.assertEqual(parsed[0]['module_name'], '个人中心')
+        self.assertEqual(parsed[0]['request_params'], {'query': {'scope': 'all'}})
+        response = self.client.post('/api/interfaces/batch-import/', {'text': text}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data['data']['imported']), 1)
+        self.assertEqual(len(response.data['data']['skipped']), 1)
+        interface = ApiInterface.objects.get(path='https://api-test.helix.city/api/v1/member/getUnreadCount')
+        self.assertEqual(interface.headers['authorization'], '')
+        self.assertNotIn('sensitive-token', str(interface.headers))
+
     @patch('platform_api.executor.urlopen', return_value=FakeHttpResponse())
     def test_automation_modules_tasks_and_run_actions(self, mocked_urlopen):
+        target_password = 'target-login-pass'
         module = AutomationModule.objects.get(app='frontend', name='个人中心')
         environment = Environment.objects.create(
             name='测试环境', base_url='https://test.example.com', login_url='https://test.example.com/api/auth/login/',
@@ -319,7 +346,7 @@ class PlatformApiTests(APITestCase):
             'name': '登录回归', 'module': module.id, 'task_type': 'ui',
             'environment': environment.id, 'owner': self.admin.id,
             'schedule': '手动执行',
-            'login_password': 'Aibet@123456',
+            'login_password': target_password,
         }, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         task_id = response.data['data']['id']
@@ -327,7 +354,7 @@ class PlatformApiTests(APITestCase):
         self.assertEqual(response.data['data']['status'], 'pending')
         self.assertEqual(response.data['data']['interface_count'], 1)
         self.assertEqual(mocked_urlopen.call_count, 0)
-        response = self.client.post(f'/api/automation/tasks/{task_id}/run/', {'login_password': 'Aibet@123456'}, format='json')
+        response = self.client.post(f'/api/automation/tasks/{task_id}/run/', {'login_password': target_password}, format='json')
         self.assertEqual(response.data['data']['status'], 'passed')
         self.assertEqual(len(response.data['data']['execution_details']), 2)
         self.assertEqual(response.data['data']['execution_details'][0]['interface_name'], '系统登录')
@@ -336,7 +363,7 @@ class PlatformApiTests(APITestCase):
         self.assertEqual(mocked_urlopen.call_count, 2)
         self.assertEqual(
             json.loads(mocked_urlopen.call_args_list[0].args[0].data.decode('utf-8')),
-            {'identifier': 'admin@example.com', 'secret': 'Aibet@123456'},
+            {'identifier': 'admin@example.com', 'secret': target_password},
         )
         self.assertEqual(response.data['data']['execution_details'][0]['request_params'], {'identifier': 'admin@example.com'})
         self.assertEqual(mocked_urlopen.call_args.kwargs['timeout'], 3)
@@ -352,7 +379,7 @@ class PlatformApiTests(APITestCase):
             'headers': {'X-Version': 'latest'}, 'request_params': {'username': 'latest'},
         }, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        response = self.client.post(f'/api/automation/task-results/{detail.id}/retry/', {'login_password': 'Aibet@123456'}, format='json')
+        response = self.client.post(f'/api/automation/task-results/{detail.id}/retry/', {'login_password': target_password}, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['data']['status'], 'passed')
         self.assertEqual(response.data['data']['execution_no'], 2)
@@ -364,13 +391,56 @@ class PlatformApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertFalse(ApiInterface.objects.filter(pk=interface.id).exists())
         self.assertTrue(AutomationTaskResult.objects.filter(task_id=task_id).exists())
-        response = self.client.post(f'/api/automation/task-results/{detail.id}/retry/', {'login_password': 'Aibet@123456'}, format='json')
+        response = self.client.post(f'/api/automation/task-results/{detail.id}/retry/', {'login_password': target_password}, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(AutomationTaskResult.objects.filter(task_id=task_id).count(), 4)
         response = self.client.delete(f'/api/automation/tasks/{task_id}/')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertFalse(AutomationTask.objects.filter(pk=task_id).exists())
         self.assertFalse(AutomationTaskResult.objects.filter(task_id=task_id).exists())
+
+    @patch('platform_api.views.execute_account_balance', return_value={
+        'member_id': 'member-1', 'adjustment_id': 'adjustment-1',
+    })
+    def test_data_factory_uses_target_system_password(self, mocked_execute):
+        environment = Environment.objects.create(
+            name='后台工具环境', base_url='https://admin.example.com',
+            login_url='https://admin.example.com/auth/login',
+        )
+        target_password = 'target-login-pass'
+        response = self.client.post('/api/data-factory/account-balance/', {
+            'environment': environment.id,
+            'email': 'member@example.com',
+            'amount': 10,
+            'login_password': target_password,
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mocked_execute.assert_called_once_with(
+            self.admin, target_password, environment.id, 'member@example.com', Decimal('10'),
+        )
+
+    @patch('platform_api.executor.urlopen', return_value=JsonFakeHttpResponse({
+        'code': 5012, 'msg': 'not logged in or illegal access', 'data': None,
+    }))
+    def test_task_login_failure_returns_clear_message(self, mocked_urlopen):
+        module = AutomationModule.objects.get(app='frontend', name='个人中心')
+        environment = Environment.objects.create(
+            name='登录失败环境', base_url='https://test.example.com',
+            login_url='https://test.example.com/api/auth/login/',
+        )
+        task = AutomationTask.objects.create(
+            name='登录失败提示', task_type='api', environment=environment, owner=self.admin,
+        )
+        task.modules.add(module)
+
+        response = self.client.post(
+            f'/api/automation/tasks/{task.id}/run/',
+            {'login_password': 'target-login-pass'}, format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('目标系统登录失败', response.data['message'], response.data)
+        self.assertIn('登录账号和密码', response.data['message'])
 
     @patch('platform_api.executor.urlopen', return_value=FakeHttpResponse())
     def test_backend_task_login_uses_configured_parameter_names(self, mocked_urlopen):

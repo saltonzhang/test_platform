@@ -34,6 +34,7 @@ export const copyEnvironment = (id:number) => request.post<never,ApiResponse<Env
 export const setDefaultEnvironment = (id:number) => request.post<never,ApiResponse<Environment>>(`/environments/${id}/default/`,{})
 export const getAutomationModules = (params:Record<string,unknown>={}) => request.get<never,ApiResponse<AutomationModule[]>>('/automation/modules/',{params})
 export const getInterfaces = (params:Record<string,unknown>={}) => request.get<never,ApiResponse<PageResult<ApiInterface>>>('/interfaces/',{params})
+export const batchImportInterfaces = (data:{text:string;module_name?:string}) => request.post<never,ApiResponse<{imported:{id:number;name:string}[];skipped:{name:string;message:string}[];failed:{name:string;message:string}[];total:number}>>('/interfaces/batch-import/',data)
 export const createInterface = (data:Record<string,unknown>) => request.post<never,ApiResponse<ApiInterface>>('/interfaces/',data)
 export const updateInterface = (id:number,data:Record<string,unknown>) => request.patch<never,ApiResponse<ApiInterface>>(`/interfaces/${id}/`,data)
 export const deleteInterface = (id:number) => request.delete<never,ApiResponse<null>>(`/interfaces/${id}/`)

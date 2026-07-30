@@ -21,4 +21,6 @@ def exception_handler(exc, context):
                 message = str(first_value[0])
             else:
                 message = str(first_value)
+    elif isinstance(response.data, list) and response.data:
+        message = str(response.data[0])
     return Response({'code': response.status_code, 'message': message, 'data': response.data}, status=response.status_code)

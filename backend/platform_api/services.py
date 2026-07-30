@@ -135,6 +135,12 @@ def get_login_parameter_names(environment):
     return account_name, password_name
 
 
+def target_login_failure_message(message):
+    detail = str(message or '').strip()
+    suffix = f' 原始信息：{detail}' if detail else ''
+    return f'目标系统登录失败，请检查目标系统登录账号和密码。{suffix}'
+
+
 def execute_task(task, operator: User, login_password: str, target_interface_id=None):
     task.status = 'running'
     task.save(update_fields=['status', 'updated_at'])
@@ -170,7 +176,9 @@ def execute_task(task, operator: User, login_password: str, target_interface_id=
         request_encoding=login_encoding,
     )
     login_status = login_outcome.status if login_outcome.access_token else 'failed'
-    login_message = login_outcome.message if login_outcome.access_token else f'{login_outcome.message} · 登录响应未返回 access Token'
+    login_message = login_outcome.message if login_outcome.access_token else target_login_failure_message(
+        f'{login_outcome.message} · 登录响应未返回 access Token'
+    )
     login_result = AutomationTaskResult.objects.create(
         task=task,
         execution_no=execution_no,

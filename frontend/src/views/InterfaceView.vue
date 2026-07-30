@@ -7,7 +7,7 @@
           <el-option v-for="item in BUSINESS_MODULES" :key="item" :label="item" :value="item" />
         </el-select>
         <span>共 {{ total }} 个接口</span>
-        <el-button type="primary" @click="openForm()"><el-icon><Plus /></el-icon>新建接口</el-button>
+        <div class="interface-actions"><el-button type="success" @click="batchDialog = true"><el-icon><Upload /></el-icon>批量录入</el-button><el-button type="primary" @click="openForm()"><el-icon><Plus /></el-icon>新建接口</el-button></div>
       </div>
       <el-table v-loading="loading" :data="interfaces" empty-text="暂无接口">
         <el-table-column prop="name" label="接口名称" min-width="170" />
@@ -43,6 +43,14 @@
       </el-form>
       <template #footer><el-button @click="dialog = false">取消</el-button><el-button type="primary" :loading="saving" @click="save">保存</el-button></template>
     </el-dialog>
+
+    <el-dialog v-model="batchDialog" title="批量录入接口" width="760">
+      <el-form label-position="top">
+        <el-form-item label="业务模块"><el-select v-model="batchModule" clearable placeholder="自动识别业务模块" style="width:100%"><el-option v-for="item in BUSINESS_MODULES" :key="item" :label="item" :value="item" /></el-select></el-form-item>
+        <el-form-item label="Fetch 请求文本"><el-input v-model="batchText" type="textarea" :rows="18" placeholder="请粘贴一个或多个 fetch(...) 请求" /></el-form-item>
+      </el-form>
+      <template #footer><el-button @click="batchDialog = false">取消</el-button><el-button type="primary" :loading="batchSaving" :disabled="!batchText.trim()" @click="batchImport">录入</el-button></template>
+    </el-dialog>
   </div>
 </template>
 
@@ -53,6 +61,7 @@ import dayjs from 'dayjs'
 import * as api from '@/api'
 import { BUSINESS_MODULES } from '@/constants'
 import { installOverflowTooltip } from '@/overflowTooltip'
+import { Upload } from '@element-plus/icons-vue'
 import type { ApiInterface, ApiParameterization, ApiResponseExtract } from '@/types'
 
 const defaultHeaders = { 'Content-Type': 'application/json; charset=utf-8', authorization: '' }
@@ -64,6 +73,10 @@ const referenceInterfaces = ref<ApiInterface[]>([])
 const total = ref(0)
 const loading = ref(false)
 const saving = ref(false)
+const batchSaving = ref(false)
+const batchDialog = ref(false)
+const batchText = ref('')
+const batchModule = ref('')
 const dialog = ref(false)
 const formRef = ref<FormInstance>()
 const query = reactive({ keyword: '', module_name: [] as string[], page: 1, pageSize: 10 })
@@ -114,6 +127,22 @@ async function save() {
     form.id ? await api.updateInterface(form.id, payload) : await api.createInterface(payload)
     dialog.value = false; await load(); ElMessage.success('接口保存成功')
   } catch (e) { ElMessage.error((e as Error).message) } finally { saving.value = false }
+}
+async function batchImport() {
+  const text = batchText.value.trim()
+  if (!text) return
+  batchSaving.value = true
+  try {
+    const res = await api.batchImportInterfaces({ text, module_name: batchModule.value })
+    const result = res.data
+    batchDialog.value = false
+    batchText.value = ''
+    batchModule.value = ''
+    await load()
+    const failed = result.failed?.length || 0
+    const skipped = result.skipped?.length || 0
+    ElMessage.success(`批量录入完成：成功 ${result.imported.length} 条，重复跳过 ${skipped} 条${failed ? `，失败 ${failed} 条` : ''}`)
+  } catch (e) { ElMessage.error((e as Error).message) } finally { batchSaving.value = false }
 }
 async function toggleExecutable(item: ApiInterface) { try { await api.updateInterface(item.id, { can_execute_in_task: item.can_execute_in_task }); ElMessage.success(item.can_execute_in_task ? '已允许任务执行' : '已禁止任务执行') } catch (e) { item.can_execute_in_task = !item.can_execute_in_task; ElMessage.error((e as Error).message) } }
 async function remove(item: ApiInterface) { try { await ElMessageBox.confirm(`确定删除接口“${item.name}”吗？`, '删除接口', { type: 'warning' }); await api.deleteInterface(item.id); await load(); ElMessage.success('接口已删除') } catch (e) { if (e !== 'cancel') ElMessage.error((e as Error).message) } }
