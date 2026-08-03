@@ -412,7 +412,7 @@ def _build_account_add_result(frontend_environment, backend_environment, email, 
     }
 
 
-def _run_single_account(frontend_environment, backend_environment, username='test01', password='Admin123!', email='', amount=5000, max_retries=10, operator=None):
+def _run_single_account(frontend_environment, backend_environment, username='test01', password='Admin123!', email='', amount=5000, max_retries=60, operator=None):
     email_clean = str(email or '').strip().lower()
     amount_value = _normalize_account_add_amount(amount)
     base_url = getattr(frontend_environment, 'base_url', '')
@@ -565,7 +565,7 @@ def _run_single_account(frontend_environment, backend_environment, username='tes
     raise DataFactoryError('注册与认证流程执行失败')
 
 
-def run_full_automation(frontend_environment, backend_environment, username='test01', password='Admin123!', email='', amount=5000, max_retries=10, operator=None, quantity=1):
+def run_full_automation(frontend_environment, backend_environment, username='test01', password='Admin123!', email='', amount=5000, max_retries=60, operator=None, quantity=1):
     """按数量注册账号；每个账号内部仍使用 max_retries 重试注册流程。"""
     try:
         account_count = int(quantity)
