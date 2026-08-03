@@ -1,7 +1,7 @@
 import axios from 'axios'
 import { clearAuth, auth } from './auth'
 import router from './router'
-import type { AccountBalanceResult, ApiInterface, ApiResponse, AutomationModule, AutomationTask, AutomationTaskResult, DashboardStats, DataFactoryExecution, Environment, LoginResult, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorTask, OrderResultPushResult, PageResult, Role, User } from './types'
+import type { AccountAddResult, AccountBalanceResult, ApiInterface, ApiResponse, AutomationModule, AutomationTask, AutomationTaskResult, DashboardStats, DataFactoryExecution, Environment, LoginResult, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorTask, OrderResultPushResult, PageResult, Role, User } from './types'
 
 const request = axios.create({ baseURL:'/api', timeout:15000 })
 request.interceptors.request.use(config => { if (auth.token) config.headers.Authorization = `Bearer ${auth.token}`; return config })
@@ -14,6 +14,7 @@ export const login = (data:{username:string;password:string}) => request.post<ne
 export const getMe = () => request.get<never,ApiResponse<User>>('/auth/me/')
 export const getDashboard = () => request.get<never,ApiResponse<DashboardStats>>('/dashboard/')
 export const executeAccountBalance = (data:{environment:number;email:string;amount:number;login_password:string}) => request.post<never,ApiResponse<AccountBalanceResult>>('/data-factory/account-balance/',data)
+export const executeAccountAdd = (data:{frontend_environment:number;backend_environment:number;email:string;amount:number|null;quantity:number;login_password:string}) => request.post<never,ApiResponse<AccountAddResult>>('/data-factory/account-add/',data)
 export const pushOrderResult = (data:Record<string,string|number>) => request.post<never,ApiResponse<OrderResultPushResult>>('/data-factory/order-result-push/',data)
 export const getDataFactoryExecutions = (params:Record<string,unknown>) => request.get<never,ApiResponse<PageResult<DataFactoryExecution>>>('/data-factory/executions/',{params})
 export const getUsers = (params:Record<string,unknown>) => request.get<never,ApiResponse<PageResult<User>>>('/users/', {params})

@@ -67,6 +67,7 @@ class DataFactoryExecution(models.Model):
     operator = models.ForeignKey(User, on_delete=models.PROTECT, related_name='data_factory_executions', verbose_name='操作人')
     environment = models.ForeignKey(Environment, on_delete=models.SET_NULL, null=True, related_name='data_factory_executions', verbose_name='运行环境')
     email = models.EmailField('会员邮箱')
+    generated_emails = models.JSONField('生成邮箱', default=list, blank=True)
     amount = models.DecimalField('金额', max_digits=14, decimal_places=2)
     member_id = models.CharField('会员ID', max_length=100, blank=True, default='')
     adjustment_id = models.CharField('审批单据ID', max_length=100, blank=True, default='')
@@ -106,6 +107,7 @@ class AutomationModule(models.Model):
 
 class ApiInterface(models.Model):
     METHOD_CHOICES = [(item, item) for item in ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']]
+    REQUEST_PARAMETER_MODE_CHOICES = [('template', '模板参数化'), ('full', '全参数化')]
 
     name = models.CharField('接口名称', max_length=200)
     method = models.CharField('请求方法', max_length=10, choices=METHOD_CHOICES)
@@ -116,6 +118,8 @@ class ApiInterface(models.Model):
     headers = models.JSONField('请求头', default=dict, blank=True)
     request_params = models.JSONField('请求参数', default=dict, blank=True)
     parameterizations = models.JSONField('参数化配置', default=list, blank=True)
+    request_parameter_mode = models.CharField('请求参数模式', max_length=20, choices=REQUEST_PARAMETER_MODE_CHOICES, default='template')
+    full_parameterizations = models.JSONField('全参数化配置', default=list, blank=True)
     assertions = models.JSONField('接口断言', default=dict, blank=True)
     reference_enabled = models.BooleanField('启用关联标记', default=False)
     reference_interface = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True, related_name='referenced_by_interfaces', verbose_name='关联接口')
@@ -145,6 +149,7 @@ class AutomationTask(models.Model):
     # 保留旧字段兼容历史任务；新任务使用 modules 关联多个业务模块。
     module = models.ForeignKey(AutomationModule, on_delete=models.PROTECT, null=True, blank=True, related_name='legacy_tasks', verbose_name='默认业务模块')
     modules = models.ManyToManyField(AutomationModule, related_name='tasks', blank=True, verbose_name='业务模块')
+    interfaces = models.ManyToManyField(ApiInterface, related_name='automation_tasks', blank=True, verbose_name='场景测试接口')
     task_type = models.CharField('测试类型', max_length=20, choices=TYPE_CHOICES)
     environment = models.ForeignKey(Environment, on_delete=models.PROTECT, related_name='automation_tasks', verbose_name='运行环境')
     status = models.CharField('任务状态', max_length=20, choices=STATUS_CHOICES, default='pending')

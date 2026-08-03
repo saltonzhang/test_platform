@@ -56,12 +56,25 @@ class ApiRequestExecutor:
             request = Request(url, data=payload, headers=request_headers, method=method)
             with urlopen(request, timeout=timeout_seconds) as response:
                 body = response.read().decode('utf-8', errors='replace')
+                response_headers = getattr(response, 'headers', {}) or {}
                 passed, assertion_message = self.assert_response(response.status, body, assertions)
                 duration_ms = self.elapsed_ms(started_at)
                 if duration_ms > timeout_seconds * 1000:
                     passed = False
                     assertion_message = f'耗时断言失败，实际 {duration_ms} ms，阈值 {timeout_seconds * 1000:g} ms'
-                token = self.extract_access_token(body) if self.is_login_url(url, login_url) and passed else ''
+                token = ''
+                if self.is_login_url(url, login_url) and passed:
+                    token = self.extract_access_token(body)
+                    if not token:
+                        token = (
+                            response_headers.get('x-token')
+                            or response_headers.get('X-Token')
+                            or response_headers.get('x-access-token')
+                            or response_headers.get('X-Access-Token')
+                            or response_headers.get('authorization')
+                            or response_headers.get('Authorization')
+                            or ''
+                        )
                 message = f'HTTP {response.status} · {assertion_message}'
                 if token:
                     message = f'HTTP {response.status} · 登录成功 · {assertion_message}'
@@ -139,9 +152,9 @@ class ApiRequestExecutor:
             data = payload.get('data', payload)
             if not isinstance(data, dict):
                 return ''
-            token = data.get('access') or data.get('access_token') or data.get('authorization') or data.get('token')
+            token = data.get('access') or data.get('access_token') or data.get('x_access_token') or data.get('x-token') or data.get('authorization') or data.get('token')
             if isinstance(token, dict):
-                token = token.get('authorization') or token.get('access') or token.get('access_token') or token.get('token')
+                token = token.get('authorization') or token.get('access') or token.get('access_token') or token.get('x_access_token') or token.get('x-token') or token.get('token')
             return token if isinstance(token, str) else ''
         except (ValueError, AttributeError, TypeError):
             return ''

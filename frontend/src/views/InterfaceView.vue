@@ -35,8 +35,40 @@
           <el-form-item label="提取返回值"><div class="extract-rule-list"><div v-for="(item, index) in form.response_extracts" :key="index" class="extract-rule-row"><el-input v-model="item.name" placeholder="保存变量名，如 token" /><el-input v-model="item.path" placeholder="JSON 路径，如 data.token" /><el-button type="danger" link @click="removeExtract(index)">删除</el-button></div><el-button type="primary" link @click="addExtract">+ 添加返回值</el-button></div></el-form-item>
         </template>
         <el-form-item label="Headers" prop="headersText"><el-input v-model="form.headersText" type="textarea" :rows="4" placeholder='{"Content-Type": "application/json; charset=utf-8"}' /></el-form-item>
-        <el-form-item label="请求参数" prop="requestParamsText"><el-input v-model="form.requestParamsText" type="textarea" :rows="5" placeholder='{"body":{"name":"{{personName}}","phone":"{{mobile}}"}}' /><small class="extract-help">参数化值支持 &#123;&#123;变量名&#125;&#125; 或 ${变量名}；关联接口变量优先使用已提取值。</small></el-form-item>
-        <el-form-item label="参数化配置"><div class="extract-rule-list"><div v-for="(item, index) in form.parameterizations" :key="index" class="extract-rule-row"><el-input v-model="item.name" placeholder="变量名，如 personName" /><el-select v-model="item.type" placeholder="数据类型" style="width:150px"><el-option label="人名" value="name"/><el-option label="时间" value="time"/><el-option label="地点" value="location"/><el-option label="手机号" value="phone"/><el-option label="身份证" value="id_card"/><el-option label="邮箱" value="email"/><el-option label="自定义" value="custom"/></el-select><el-input v-if="item.type === 'custom'" v-model="item.value" placeholder="自定义值" /><el-button type="danger" link @click="removeParameterization(index)">删除</el-button></div><el-button type="primary" link @click="addParameterization">+ 添加参数化参数</el-button></div></el-form-item>
+        <el-form-item label="请求参数模式"><el-radio-group v-model="form.request_parameter_mode" @change="changeRequestParameterMode"><el-radio-button label="template">模板参数化</el-radio-button><el-radio-button label="full">全参数化</el-radio-button></el-radio-group></el-form-item>
+        <template v-if="form.request_parameter_mode === 'template'">
+          <el-form-item label="请求参数" prop="requestParamsText"><el-input v-model="form.requestParamsText" type="textarea" :rows="5" placeholder='{"body":{"name":"{{personName}}","phone":"{{mobile}}"}}' /><small class="extract-help">参数化值支持 &#123;&#123;变量名&#125;&#125; 或 ${变量名}；关联接口变量优先使用已提取值。</small></el-form-item>
+          <el-form-item label="参数化配置"><div class="extract-rule-list"><div v-for="(item, index) in form.parameterizations" :key="index" class="template-parameter-row"><el-input v-model="item.name" placeholder="变量名，如 personName" /><el-select v-model="item.type" placeholder="数据类型" style="width:150px"><el-option v-for="itemType in parameterTypes" :key="itemType.value" :label="itemType.label" :value="itemType.value"/></el-select><el-input v-if="item.type === 'custom'" v-model="item.value" placeholder="自定义值" /><el-button link type="primary" @click="addParameterizationToQuery(index)">写入 Query</el-button><el-button type="danger" link @click="removeParameterization(index)">删除</el-button></div><el-button type="primary" link @click="addParameterization">+ 添加参数化配置</el-button></div></el-form-item>
+        </template>
+        <el-form-item v-else label="全参数化配置">
+          <div class="full-parameter-list">
+            <div class="full-parameter-actions">
+              <span class="muted-text">共 {{ form.full_parameterizations.length }} 个参数</span>
+              <div>
+                <el-button type="primary" link @click="syncFullParameterizationsFromRequest()">从请求参数重新同步</el-button>
+                <el-button type="primary" @click="addFullParameterization">添加参数</el-button>
+              </div>
+            </div>
+            <div v-for="(item, index) in form.full_parameterizations" :key="index" class="full-parameter-row">
+              <el-input v-model="item.path" :disabled="!item.is_manual" placeholder="参数路径，如 body.user.name" />
+              <el-select v-model="item.value_mode" style="width:118px">
+                <el-option label="固定值" value="fixed" />
+                <el-option label="变量" value="variable" />
+              </el-select>
+              <div class="full-parameter-value">
+                <el-input v-if="item.value_mode === 'fixed'" v-model="item.valueText" placeholder='JSON 数组，如 ["张三","李四",1]' />
+                <template v-else>
+                  <el-select v-model="item.variable_type" style="width:130px">
+                    <el-option v-for="itemType in parameterTypes" :key="itemType.value" :label="itemType.label" :value="itemType.value" />
+                  </el-select>
+                  <el-input v-if="item.variable_type === 'custom'" v-model="item.valueText" placeholder="如 ${bit[0].uid}、${bit[0,2].uid}、${bit[*].uid}" />
+                </template>
+              </div>
+              <el-button type="danger" link @click="removeFullParameterization(index)">删除</el-button>
+            </div>
+            <el-empty v-if="!form.full_parameterizations.length" description="暂无参数，请手动添加" :image-size="52" />
+          </div>
+        </el-form-item>
         <el-form-item label="接口断言" prop="assertionsText"><el-input v-model="form.assertionsText" type="textarea" :rows="5" placeholder='{"status_code": 200, "json_path": "data.id", "expected_value": 1}' /></el-form-item>
         <el-form-item label="接口描述"><el-input v-model="form.description" type="textarea" :rows="3" /></el-form-item>
         <el-checkbox v-model="form.can_execute_in_task">允许被任务执行</el-checkbox>
@@ -61,12 +93,13 @@ import dayjs from 'dayjs'
 import * as api from '@/api'
 import { BUSINESS_MODULES } from '@/constants'
 import { installOverflowTooltip } from '@/overflowTooltip'
-import { Upload } from '@element-plus/icons-vue'
-import type { ApiInterface, ApiParameterization, ApiResponseExtract } from '@/types'
+import { Plus, Upload } from '@element-plus/icons-vue'
+import type { ApiFullParameterization, ApiInterface, ApiParameterType, ApiParameterization, ApiResponseExtract } from '@/types'
 
 const defaultHeaders = { 'Content-Type': 'application/json; charset=utf-8', authorization: '' }
 const defaultAssertions = { status_code: 200, timeout_seconds: 3, json_path: 'code', expected_value: 0 }
 const methods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']
+const parameterTypes:{label:string;value:ApiParameterType}[]=[{label:'人名',value:'name'},{label:'时间',value:'time'},{label:'地点',value:'location'},{label:'手机号',value:'phone'},{label:'身份证',value:'id_card'},{label:'邮箱',value:'email'},{label:'自定义',value:'custom'}]
 const pageSizes = [10, 50, 100]
 const interfaces = ref<ApiInterface[]>([])
 const referenceInterfaces = ref<ApiInterface[]>([])
@@ -80,7 +113,8 @@ const batchModule = ref('')
 const dialog = ref(false)
 const formRef = ref<FormInstance>()
 const query = reactive({ keyword: '', module_name: [] as string[], page: 1, pageSize: 10 })
-const form = reactive({ id: 0, name: '', method: 'GET', path: '', module_name: '', api_type: '系统录入', description: '', headersText: JSON.stringify(defaultHeaders, null, 2), requestParamsText: '', parameterizations: [] as ApiParameterization[], assertionsText: JSON.stringify(defaultAssertions, null, 2), reference_enabled: false, reference_interface: null as number | null, response_extracts: [] as ApiResponseExtract[], can_execute_in_task: true })
+type FullParameterizationForm={path:string;value_mode:'fixed'|'variable';valueText:string;variable_type:ApiParameterType;is_manual:boolean}
+const form = reactive({ id: 0, name: '', method: 'GET', path: '', module_name: '', api_type: '系统录入', description: '', headersText: JSON.stringify(defaultHeaders, null, 2), requestParamsText: '', parameterizations: [] as ApiParameterization[], request_parameter_mode:'template' as 'template'|'full', full_parameterizations:[] as FullParameterizationForm[], assertionsText: JSON.stringify(defaultAssertions, null, 2), reference_enabled: false, reference_interface: null as number | null, response_extracts: [] as ApiResponseExtract[], can_execute_in_task: true })
 
 function applyModuleTokenHeader() {
   if (form.id) return
@@ -114,16 +148,146 @@ function addExtract() { form.response_extracts.push({ name: '', path: '' }) }
 function removeExtract(index: number) { form.response_extracts.splice(index, 1) }
 function addParameterization() { form.parameterizations.push({ name: '', type: 'name' }) }
 function removeParameterization(index: number) { form.parameterizations.splice(index, 1) }
+function addParameterizationToQuery(index:number){
+  const parameter=form.parameterizations[index],name=parameter?.name.trim()
+  if(!name||!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)){ElMessage.error('请先填写合法的变量名');return}
+  try{
+    const requestParams=JSON.parse(form.requestParamsText||'{}')
+    if(!requestParams||Array.isArray(requestParams)||typeof requestParams!=='object'){ElMessage.error('请求参数必须是 JSON 对象');return}
+    if(requestParams.query!==undefined&&(!requestParams.query||Array.isArray(requestParams.query)||typeof requestParams.query!=='object')){ElMessage.error('query 必须是 JSON 对象');return}
+    requestParams.query={...(requestParams.query||{}),[name]:`{{${name}}}`}
+    form.requestParamsText=JSON.stringify(requestParams,null,2)
+    ElMessage.success(`已将 ${name} 添加到 Query 参数`)
+  }catch{ElMessage.error('请求参数 JSON 格式不正确')}
+}
+function collectParameterPaths(value:unknown,prefix:string,paths:string[]){
+  if(value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).length){
+    for(const [key,item] of Object.entries(value))collectParameterPaths(item,`${prefix}.${key}`,paths)
+    return
+  }
+  paths.push(prefix)
+}
+function addFullParameterization(){form.full_parameterizations.push({path:`${form.method==='GET'?'query':'body'}.`,value_mode:'fixed',valueText:'[]',variable_type:'name',is_manual:true})}
+function removeFullParameterization(index:number){form.full_parameterizations.splice(index,1)}
+function syncFullParameterizationsFromRequest(showError=true){
+  const fail=(message:string)=>{if(showError)ElMessage.error(message);return false}
+  try{
+    const requestParams=JSON.parse(form.requestParamsText||'{}') as Record<string,unknown>
+    if(!requestParams||Array.isArray(requestParams)||typeof requestParams!=='object')return fail('请求参数必须是 JSON 对象')
+    const paths:string[]=[]
+    const hasWrapper='query' in requestParams||'body' in requestParams
+    if(hasWrapper){
+      if('query' in requestParams)collectParameterPaths(requestParams.query,'query',paths)
+      if('body' in requestParams)collectParameterPaths(requestParams.body,'body',paths)
+    }else{
+      const root=form.method==='GET'?'query':'body'
+      collectParameterPaths(requestParams,root,paths)
+    }
+    const validPaths=paths.filter(path=>/^(?:query|body)\.(?:[A-Za-z_][A-Za-z0-9_]*|\d+)(?:\.(?:[A-Za-z_][A-Za-z0-9_]*|\d+))*$/.test(path))
+    if(!validPaths.length)return fail('请求参数中没有可配置的参数 key')
+    const existing=new Map(form.full_parameterizations.map(item=>[item.path,item]))
+    form.full_parameterizations=validPaths.map(path=>existing.get(path)||{path,value_mode:'fixed',valueText:'[]',variable_type:'name',is_manual:false})
+    return true
+  }catch{return fail('请求参数 JSON 格式不正确')}
+}
+function changeRequestParameterMode(value:unknown){
+  if(value==='full')syncFullParameterizationsFromRequest(false)
+}
+function validateCustomValueText(path:string,text:string){
+  const value=text.trim()
+  if(!value){ElMessage.error(`自定义变量 ${path} 必须填写值`);return false}
+  const placeholder=/\$\{[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*|\[(?:\*|\d+(?:,\d+)*|\d*:\d*)\])*\}/g
+  if(value.replace(placeholder,'').includes('${')){
+    ElMessage.error(`自定义变量 ${path} 的关联变量表达式无效`)
+    return false
+  }
+  return true
+}
+function serializeFullParameterizations():ApiFullParameterization[]|null{
+  const paths=new Set<string>(),result:ApiFullParameterization[]=[]
+  for(const item of form.full_parameterizations){
+    const path=item.path.trim()
+    if(!/^(?:query|body)\.(?:[A-Za-z_][A-Za-z0-9_]*|\d+)(?:\.(?:[A-Za-z_][A-Za-z0-9_]*|\d+))*$/.test(path)){ElMessage.error('参数路径必须以 query 或 body 开头');return null}
+    if(paths.has(path)){ElMessage.error(`参数路径重复：${path}`);return null}
+    paths.add(path)
+    if(item.value_mode==='fixed'){
+      try{
+        const values=JSON.parse(item.valueText)
+        if(!Array.isArray(values)||!values.length){ElMessage.error(`固定参数 ${path} 必须填写至少一个值`);return null}
+        result.push({path,value_mode:'fixed',values})
+      }catch{ElMessage.error(`固定参数 ${path} 必须填写 JSON 数组`);return null}
+    }else{
+      if(item.variable_type==='custom'){
+        if(!validateCustomValueText(path,item.valueText))return null
+        result.push({path,value_mode:'variable',variable_type:item.variable_type,value:item.valueText.trim()})
+      }else{
+        result.push({path,value_mode:'variable',variable_type:item.variable_type})
+      }
+    }
+  }
+  if(!result.length){ElMessage.error('请至少配置一条全参数化参数');return null}
+  return result
+}
 function openForm(item?: ApiInterface) {
-  Object.assign(form, item ? { id: item.id, name: item.name, method: item.method, path: item.path, module_name: item.module_name, api_type: '系统录入', description: item.description, headersText: JSON.stringify(item.headers || {}, null, 2), requestParamsText: Object.keys(item.request_params || {}).length ? JSON.stringify(item.request_params, null, 2) : '', parameterizations: (item.parameterizations || []).map(rule => ({ ...rule })), assertionsText: JSON.stringify(Object.keys(item.assertions || {}).length ? item.assertions : defaultAssertions, null, 2), reference_enabled: item.reference_enabled, reference_interface: item.reference_interface, response_extracts: (item.response_extracts || []).map(rule => ({ ...rule })), can_execute_in_task: item.can_execute_in_task } : { id: 0, name: '', method: 'GET', path: '', module_name: '', api_type: '系统录入', description: '', headersText: JSON.stringify(defaultHeaders, null, 2), requestParamsText: '', parameterizations: [], assertionsText: JSON.stringify(defaultAssertions, null, 2), reference_enabled: false, reference_interface: null, response_extracts: [], can_execute_in_task: true }); dialog.value = true; void loadReferenceInterfaces() }
+  Object.assign(
+    form,
+    item ? {
+      id: item.id,
+      name: item.name,
+      method: item.method,
+      path: item.path,
+      module_name: item.module_name,
+      api_type: '系统录入',
+      description: item.description,
+      headersText: JSON.stringify(item.headers || {}, null, 2),
+      requestParamsText: Object.keys(item.request_params || {}).length ? JSON.stringify(item.request_params, null, 2) : '',
+      parameterizations: (item.parameterizations || []).map(rule => ({ ...rule })),
+      request_parameter_mode: item.request_parameter_mode || 'template',
+      full_parameterizations: (item.full_parameterizations || []).map(rule => ({
+        path: rule.path,
+        value_mode: rule.value_mode,
+        valueText: rule.value_mode === 'fixed' ? JSON.stringify(rule.values ?? (Object.prototype.hasOwnProperty.call(rule, 'value') ? [rule.value] : [])) : String(rule.value ?? ''),
+        variable_type: rule.variable_type || 'name',
+        is_manual: true,
+      })),
+      assertionsText: JSON.stringify(Object.keys(item.assertions || {}).length ? item.assertions : defaultAssertions, null, 2),
+      reference_enabled: item.reference_enabled,
+      reference_interface: item.reference_interface,
+      response_extracts: (item.response_extracts || []).map(rule => ({ ...rule })),
+      can_execute_in_task: item.can_execute_in_task,
+    } : {
+      id: 0,
+      name: '',
+      method: 'GET',
+      path: '',
+      module_name: '',
+      api_type: '系统录入',
+      description: '',
+      headersText: JSON.stringify(defaultHeaders, null, 2),
+      requestParamsText: '',
+      parameterizations: [],
+      request_parameter_mode: 'template',
+      full_parameterizations: [],
+      assertionsText: JSON.stringify(defaultAssertions, null, 2),
+      reference_enabled: false,
+      reference_interface: null,
+      response_extracts: [],
+      can_execute_in_task: true,
+    }
+  )
+  dialog.value = true
+  void loadReferenceInterfaces()
+}
 async function save() {
   if (!await formRef.value?.validate().catch(() => false)) return
+  const fullParameterizations=form.request_parameter_mode==='full'?serializeFullParameterizations():[]
+  if(form.request_parameter_mode==='full'&&!fullParameterizations)return
   const extractNames = form.response_extracts.map(item => item.name.trim())
   if (form.reference_enabled && (!form.reference_interface || !form.response_extracts.length || form.response_extracts.some(item => !item.name.trim() || !item.path.trim()))) { ElMessage.error('请完整配置关联接口和返回值提取规则'); return }
   if (form.reference_enabled && new Set(extractNames).size !== extractNames.length) { ElMessage.error('响应提取变量名不能重复'); return }
   saving.value = true
   try {
-    const payload = { name: form.name, method: form.method, path: form.path, module_name: form.module_name, api_type: '系统录入', description: form.description, headers: JSON.parse(form.headersText || '{}'), request_params: JSON.parse(form.requestParamsText || '{}'), parameterizations: form.parameterizations, assertions: JSON.parse(form.assertionsText || '{}'), reference_enabled: form.reference_enabled, reference_interface: form.reference_enabled ? form.reference_interface : null, response_extracts: form.reference_enabled ? form.response_extracts : [], can_execute_in_task: form.can_execute_in_task }
+    const payload = { name: form.name, method: form.method, path: form.path, module_name: form.module_name, api_type: '系统录入', description: form.description, headers: JSON.parse(form.headersText || '{}'), request_parameter_mode:form.request_parameter_mode, request_params:form.request_parameter_mode==='template'?JSON.parse(form.requestParamsText || '{}'):{}, parameterizations:form.request_parameter_mode==='template'?form.parameterizations:[], full_parameterizations:fullParameterizations, assertions: JSON.parse(form.assertionsText || '{}'), reference_enabled: form.reference_enabled, reference_interface: form.reference_enabled ? form.reference_interface : null, response_extracts: form.reference_enabled ? form.response_extracts : [], can_execute_in_task: form.can_execute_in_task }
     form.id ? await api.updateInterface(form.id, payload) : await api.createInterface(payload)
     dialog.value = false; await load(); ElMessage.success('接口保存成功')
   } catch (e) { ElMessage.error((e as Error).message) } finally { saving.value = false }
@@ -157,5 +321,12 @@ onUnmounted(() => removeOverflowTooltip())
 .muted-text { color: #98a2b3; font-size: 12px; }
 .extract-rule-list { width: 100%; display: grid; gap: 8px; }
 .extract-rule-row { display: grid; grid-template-columns: 1fr 1.5fr auto; gap: 8px; align-items: center; }
+.template-parameter-row { display: grid; grid-template-columns: minmax(160px, 1fr) 150px minmax(130px, 1fr) auto auto; gap: 8px; align-items: center; }
+.full-parameter-list { width: 100%; display: grid; gap: 8px; }
+.full-parameter-actions { display: flex; align-items: center; justify-content: space-between; min-height: 32px; }
+.full-parameter-row { display: grid; grid-template-columns: minmax(180px, 1fr) 118px minmax(330px, 1.2fr) auto; gap: 8px; align-items: center; }
+.full-parameter-value { display: flex; gap: 8px; min-width: 0; }
+.full-parameter-value > .el-input { flex: 1; min-width: 120px; }
 .extract-help { display: block; margin-top: 5px; color: #98a2b3; font-size: 12px; line-height: 1.5; }
+@media (max-width: 640px) { .template-parameter-row, .full-parameter-row { grid-template-columns: 1fr 118px; } }
 </style>

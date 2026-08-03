@@ -4,7 +4,7 @@
       <div class="brand"><span class="brand-mark">A</span><div><b>AIBET</b><small>智能自动化平台</small></div></div>
       <nav>
         <router-link v-if="hasPermission('home.view')" to="/"><el-icon><HomeFilled /></el-icon><span>首页</span></router-link>
-        <div v-if="hasPermission('data_factory.view')||hasPermission('data_factory.account_balance')||hasPermission('data_factory.order_result_push')" :class="['nav-group',{open:expandedGroups.intelligence}]">
+        <div v-if="hasPermission('data_factory.view')||hasPermission('data_factory.account_balance')||hasPermission('data_factory.account_add')||hasPermission('data_factory.order_result_push')" :class="['nav-group',{open:expandedGroups.intelligence}]">
           <button class="nav-parent" :class="{active:route.path.startsWith('/intelligence')}" type="button" :aria-expanded="expandedGroups.intelligence" aria-controls="intelligence-menu" @click="toggleGroup('intelligence')"><el-icon><MagicStick /></el-icon><span>智能工具</span><el-icon class="nav-arrow"><ArrowRight /></el-icon></button>
           <div id="intelligence-menu" class="nav-children">
             <strong class="nav-flyout-title">智能工具</strong>

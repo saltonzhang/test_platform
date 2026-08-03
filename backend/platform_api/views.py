@@ -16,7 +16,7 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.views import TokenObtainPairView
 
 from .constants import BUSINESS_MODULE_NAMES
-from .data_factory import DataFactoryError, execute_account_balance, push_order_result
+from .data_factory import DataFactoryError, execute_account_add, execute_account_balance, push_order_result
 from .interface_import import InterfaceImportError, parse_fetch_text
 from .models import ApiInterface, AutomationModule, AutomationTask, AutomationTaskResult, DataFactoryExecution, Environment, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorTask, Role, User
 from .pagination import StandardPagination
@@ -132,7 +132,7 @@ class DataFactoryAccountBalanceView(APIView):
             amount = Decimal(str(request.data.get('amount', '')))
         except Exception as exc:
             raise ValidationError({'amount': '请输入有效金额'}) from exc
-        if amount <= 0 or amount > Decimal('1000000'):
+        if not amount.is_finite() or amount <= 0 or amount > Decimal('1000000'):
             raise ValidationError({'amount': '金额必须大于 0 且不超过 1000000'})
         environment_id = request.data.get('environment')
         if not Environment.objects.filter(pk=environment_id).exists():
@@ -145,12 +145,138 @@ class DataFactoryAccountBalanceView(APIView):
             execution.message = str(exc)
             execution.save(update_fields=['status', 'message', 'updated_at'])
             raise ValidationError(str(exc)) from exc
+        except Exception as exc:
+            execution.status = 'failed'
+            execution.message = str(exc)
+            execution.save(update_fields=['status', 'message', 'updated_at'])
+            raise ValidationError(f'账户余额执行异常：{exc}') from exc
         execution.status = 'passed'
         execution.member_id = result['member_id']
         execution.adjustment_id = result['adjustment_id']
         execution.message = '加款单据已创建并审批'
         execution.save(update_fields=['status', 'member_id', 'adjustment_id', 'message', 'updated_at'])
         return success(result, '账户余额已加款并审批')
+
+
+def resolve_account_add_environment_ids(data):
+    frontend_environment_id = data.get('frontend_environment') or data.get('front_environment')
+    backend_environment_id = data.get('backend_environment') or data.get('back_environment')
+    if frontend_environment_id and backend_environment_id:
+        return frontend_environment_id, backend_environment_id
+
+    selected = data.get('environments')
+    if selected in (None, ''):
+        selected = data.get('environment')
+    if hasattr(data, 'getlist'):
+        selected_list = data.getlist('environments') or data.getlist('environment')
+        if selected_list:
+            selected = selected_list
+    if isinstance(selected, (list, tuple)):
+        selected_ids = [item for item in selected if item not in (None, '')]
+        if len(selected_ids) != 2:
+            raise ValidationError({'environment': '请选择前台和后台两个运行环境'})
+        return selected_ids[0], selected_ids[1]
+    return selected, selected
+
+
+class DataFactoryAccountAddView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        require_data_factory_account_add_permission(request)
+        password = str(request.data.get('login_password', ''))
+        if not password:
+            raise ValidationError({'login_password': '请输入系统密码'})
+        frontend_environment_id, backend_environment_id = resolve_account_add_environment_ids(request.data)
+        frontend_environment = Environment.objects.filter(pk=frontend_environment_id).first()
+        if not frontend_environment:
+            raise ValidationError({'frontend_environment': '请选择有效前台运行环境'})
+        backend_environment = Environment.objects.filter(pk=backend_environment_id).first()
+        if not backend_environment:
+            raise ValidationError({'backend_environment': '请选择有效后台运行环境'})
+        if not frontend_environment.base_url:
+            raise ValidationError({'frontend_environment': '请选择已配置前台地址的运行环境'})
+        if not backend_environment.login_url:
+            raise ValidationError({'backend_environment': '请选择已配置后台登录地址的运行环境'})
+        email = str(request.data.get('email', '')).strip().lower()
+        raw_amount = request.data.get('amount')
+        if raw_amount in (None, ''):
+            amount = Decimal('0')
+        else:
+            try:
+                amount = Decimal(str(raw_amount))
+            except Exception as exc:
+                raise ValidationError({'amount': '请输入有效金额'}) from exc
+        if not amount.is_finite() or amount < 0 or amount > Decimal('1000000'):
+            raise ValidationError({'amount': '金额不能小于 0 且不超过 1000000'})
+        try:
+            quantity = int(request.data.get('quantity', 1))
+        except (TypeError, ValueError) as exc:
+            raise ValidationError({'quantity': '请输入有效数量'}) from exc
+        if quantity <= 0:
+            raise ValidationError({'quantity': '数量必须大于 0'})
+        execution = DataFactoryExecution.objects.create(
+            tool_name='账户添加', operator=request.user, environment=frontend_environment, email=email, amount=amount,
+        )
+        execution_id = execution.id
+        frontend_environment_id = frontend_environment.id
+        backend_environment_id = backend_environment.id
+        operator = request.user
+
+        def execute_created_account_add():
+            close_old_connections()
+            execution_record = execution
+            try:
+                result = execute_account_add(
+                    operator,
+                    password,
+                    frontend_environment_id,
+                    backend_environment_id,
+                    email,
+                    amount,
+                    quantity,
+                )
+                generated_emails = [
+                    str(item).strip().lower()
+                    for item in result.get('emails', [])
+                    if str(item or '').strip()
+                ] if not email else []
+                execution_record.status = 'passed'
+                execution_record.generated_emails = generated_emails
+                if generated_emails:
+                    execution_record.email = generated_emails[0]
+                execution_record.member_id = str(result.get('member_id') or '')
+                execution_record.adjustment_id = str(result.get('adjustment_id') or '')
+                execution_record.message = f'账户添加执行成功（前台：{frontend_environment.name}；后台：{backend_environment.name}）'
+                execution_record.save(update_fields=['status', 'email', 'generated_emails', 'member_id', 'adjustment_id', 'message', 'updated_at'])
+            except DataFactoryError as exc:
+                if execution_record:
+                    execution_record.status = 'failed'
+                    execution_record.message = str(exc)
+                    execution_record.save(update_fields=['status', 'message', 'updated_at'])
+            except Exception as exc:
+                if execution_record:
+                    execution_record.status = 'failed'
+                    execution_record.message = f'账户添加执行异常：{exc}'
+                    execution_record.save(update_fields=['status', 'message', 'updated_at'])
+            finally:
+                close_old_connections()
+
+        transaction.on_commit(lambda: threading.Thread(target=execute_created_account_add, daemon=True).start())
+        return success(
+            {
+                'execution_id': execution.id,
+                'environment_name': f'{frontend_environment.name} / {backend_environment.name}',
+                'frontend_environment_name': frontend_environment.name,
+                'backend_environment_name': backend_environment.name,
+                'email': email,
+                'amount': str(amount),
+                'quantity': quantity,
+                'status': 'running',
+            },
+            '账户添加已提交，正在后台执行',
+            status.HTTP_202_ACCEPTED,
+        )
 
 
 class DataFactoryOrderResultPushView(APIView):
@@ -197,6 +323,12 @@ def require_data_factory_permission(request):
         raise PermissionDenied('当前账号没有账户余额工具权限')
 
 
+def require_data_factory_account_add_permission(request):
+    permissions = request.user.role.permissions if isinstance(request.user.role.permissions, list) else []
+    if not (request.user.is_superuser or request.user.role.code == 'admin' or 'data_factory.account_add' in permissions):
+        raise PermissionDenied('当前账号没有账户添加工具权限')
+
+
 def require_order_result_push_permission(request):
     permissions = request.user.role.permissions if isinstance(request.user.role.permissions, list) else []
     if not (request.user.is_superuser or request.user.role.code == 'admin' or 'data_factory.order_result_push' in permissions):
@@ -205,7 +337,7 @@ def require_order_result_push_permission(request):
 
 def require_data_factory_view_permission(request):
     permissions = request.user.role.permissions if isinstance(request.user.role.permissions, list) else []
-    if not (request.user.is_superuser or request.user.role.code == 'admin' or {'data_factory.view', 'data_factory.account_balance', 'data_factory.order_result_push'} & set(permissions)):
+    if not (request.user.is_superuser or request.user.role.code == 'admin' or {'data_factory.view', 'data_factory.account_add', 'data_factory.account_balance', 'data_factory.order_result_push'} & set(permissions)):
         raise PermissionDenied('当前账号没有查看数据工厂权限')
 
 
@@ -476,7 +608,7 @@ class ApiInterfaceViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
 
 
 class AutomationTaskViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
-    queryset = AutomationTask.objects.select_related('module', 'environment', 'owner').prefetch_related('modules', 'execution_details').all()
+    queryset = AutomationTask.objects.select_related('module', 'environment', 'owner').prefetch_related('modules', 'interfaces', 'execution_details').all()
     serializer_class = AutomationTaskSerializer
     action_permissions = {'list':'automation.view','retrieve':'automation.view','create':'automation.create','update':'automation.edit','partial_update':'automation.edit','destroy':'automation.delete','run':'automation.run','stop':'automation.run'}
 

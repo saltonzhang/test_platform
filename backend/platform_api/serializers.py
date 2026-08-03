@@ -1,3 +1,4 @@
+import json
 import re
 from urllib.parse import unquote
 
@@ -17,9 +18,52 @@ ALLOWED_PERMISSIONS = {
     'users.view', 'users.manage', 'users.status', 'users.delete',
     'roles.view', 'roles.manage', 'roles.grant', 'roles.delete',
     'data_factory.view',
+    'data_factory.account_add',
     'data_factory.account_balance',
     'data_factory.order_result_push',
 }
+
+PARAMETERIZATION_TYPES = {'name', 'time', 'location', 'phone', 'id_card', 'email', 'custom'}
+FULL_PARAMETER_PATH = re.compile(r'^(?:query|body)\.(?:[A-Za-z_][A-Za-z0-9_]*|\d+)(?:\.(?:[A-Za-z_][A-Za-z0-9_]*|\d+))*$')
+FULL_CUSTOM_VALUE_PLACEHOLDER = re.compile(
+    r'\$\{[A-Za-z_][A-Za-z0-9_]*'
+    r'(?:\.[A-Za-z_][A-Za-z0-9_]*|\[(?:\*|\d+(?:,\d+)*|\d*:\d*)\])*\}'
+)
+
+
+def validate_custom_value_template(parameter_path, raw_value):
+    custom_value = str(raw_value).strip()
+    if not custom_value:
+        raise serializers.ValidationError(f'自定义变量 {parameter_path} 必须填写值')
+    if '${' in FULL_CUSTOM_VALUE_PLACEHOLDER.sub('', custom_value):
+        raise serializers.ValidationError(
+            f'自定义变量 {parameter_path} 的关联变量表达式无效，'
+            '支持 ${bit[0].uid}、${bit[0,2].uid}、${bit[0:2].uid} 或 ${bit[*].uid}'
+        )
+    return custom_value
+
+
+def normalize_full_parameterizations_for_compare(value):
+    normalized = []
+    for item in value or []:
+        if not isinstance(item, dict):
+            normalized.append(item)
+            continue
+        value_mode = str(item.get('value_mode', '')).strip()
+        normalized_item = {'path': str(item.get('path', '')).strip(), 'value_mode': value_mode}
+        if value_mode == 'fixed':
+            if isinstance(item.get('values'), list):
+                normalized_item['values'] = item['values']
+            elif 'value' in item:
+                normalized_item['values'] = [item['value']]
+        else:
+            variable_type = str(item.get('variable_type', '')).strip()
+            normalized_item['variable_type'] = variable_type
+            if variable_type == 'custom':
+                if 'value' in item:
+                    normalized_item['value'] = str(item.get('value', '')).strip()
+        normalized.append(normalized_item)
+    return normalized
 
 
 class RoleSerializer(serializers.ModelSerializer):
@@ -107,11 +151,11 @@ class DataFactoryExecutionSerializer(serializers.ModelSerializer):
             if obj.message:
                 content['信息'] = obj.message
             return content
-        content = {
-            '会员邮箱': obj.email,
-            '金额': str(obj.amount),
-            '执行结果': obj.get_status_display(),
-        }
+        content = {'金额': str(obj.amount), '执行结果': obj.get_status_display()}
+        if obj.tool_name == '账户添加' and obj.generated_emails:
+            content['生成邮箱'] = '、'.join(str(item) for item in obj.generated_emails)
+        else:
+            content['会员邮箱'] = obj.email
         if obj.member_id:
             content['Member ID'] = obj.member_id
         if obj.adjustment_id:
@@ -141,7 +185,7 @@ class ApiInterfaceSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ApiInterface
-        fields = ['id', 'name', 'method', 'path', 'module_name', 'api_type', 'description', 'headers', 'request_params', 'parameterizations', 'assertions', 'reference_enabled', 'reference_interface', 'reference_interface_name', 'response_extracts', 'can_execute_in_task', 'created_by', 'created_by_name', 'created_at', 'updated_at']
+        fields = ['id', 'name', 'method', 'path', 'module_name', 'api_type', 'description', 'headers', 'request_params', 'parameterizations', 'request_parameter_mode', 'full_parameterizations', 'assertions', 'reference_enabled', 'reference_interface', 'reference_interface_name', 'response_extracts', 'can_execute_in_task', 'created_by', 'created_by_name', 'created_at', 'updated_at']
         read_only_fields = ['id', 'created_by', 'created_by_name', 'created_at', 'updated_at']
 
     def to_representation(self, instance):
@@ -162,7 +206,6 @@ class ApiInterfaceSerializer(serializers.ModelSerializer):
     def validate_parameterizations(self, value):
         if not isinstance(value, list):
             raise serializers.ValidationError('参数化配置必须是数组')
-        allowed_types = {'name', 'time', 'location', 'phone', 'id_card', 'email', 'custom'}
         normalized, names = [], set()
         for item in value:
             if not isinstance(item, dict):
@@ -173,7 +216,7 @@ class ApiInterfaceSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError('参数化变量名必须以字母或下划线开头，只能包含字母、数字和下划线')
             if name in names:
                 raise serializers.ValidationError(f'参数化变量名重复：{name}')
-            if kind not in allowed_types:
+            if kind not in PARAMETERIZATION_TYPES:
                 raise serializers.ValidationError(f'不支持的参数化类型：{kind}')
             if kind == 'custom' and not str(item.get('value', '')).strip():
                 raise serializers.ValidationError(f'自定义参数 {name} 必须填写值')
@@ -181,19 +224,76 @@ class ApiInterfaceSerializer(serializers.ModelSerializer):
             normalized.append({'name': name, 'type': kind, **({'value': item.get('value', '')} if kind == 'custom' else {})})
         return normalized
 
+    def validate_request_parameter_mode(self, value):
+        if value not in {'template', 'full'}:
+            raise serializers.ValidationError('请求参数模式必须是模板参数化或全参数化')
+        return value
+
+    def validate_full_parameterizations(self, value):
+        if not isinstance(value, list):
+            raise serializers.ValidationError('全参数化配置必须是数组')
+        normalized, paths = [], set()
+        missing = object()
+        for item in value:
+            if not isinstance(item, dict):
+                raise serializers.ValidationError('每条全参数化配置必须是对象')
+            parameter_path = str(item.get('path', '')).strip()
+            if not FULL_PARAMETER_PATH.fullmatch(parameter_path):
+                raise serializers.ValidationError('参数路径必须以 query 或 body 开头，例如 query.page 或 body.user.name')
+            if parameter_path in paths:
+                raise serializers.ValidationError(f'参数路径重复：{parameter_path}')
+            value_mode = str(item.get('value_mode', '')).strip()
+            if value_mode not in {'fixed', 'variable'}:
+                raise serializers.ValidationError(f'参数 {parameter_path} 的取值方式无效')
+            normalized_item = {'path': parameter_path, 'value_mode': value_mode}
+            if value_mode == 'fixed':
+                fixed_values = item.get('values', missing)
+                if fixed_values is missing and 'value' in item:
+                    fixed_values = [item['value']]
+                if fixed_values is missing or not isinstance(fixed_values, list) or not fixed_values:
+                    raise serializers.ValidationError(f'固定参数 {parameter_path} 必须填写至少一个 JSON 值')
+                normalized_item['values'] = fixed_values
+            else:
+                variable_type = str(item.get('variable_type', '')).strip()
+                if variable_type not in PARAMETERIZATION_TYPES:
+                    raise serializers.ValidationError(f'参数 {parameter_path} 的变量类型无效')
+                normalized_item['variable_type'] = variable_type
+                if variable_type == 'custom':
+                    custom_value = validate_custom_value_template(parameter_path, item.get('value', ''))
+                    normalized_item['value'] = custom_value
+            paths.add(parameter_path)
+            normalized.append(normalized_item)
+        return normalized
+
     def validate(self, attrs):
         attrs = super().validate(attrs)
         path = attrs.get('path', self.instance.path if self.instance else '')
-        request_params = attrs.get(
-            'request_params', self.instance.request_params if self.instance else {}
-        )
+        request_parameter_mode = attrs.get('request_parameter_mode', self.instance.request_parameter_mode if self.instance else 'template')
+        if request_parameter_mode == 'full':
+            full_parameterizations = attrs.get('full_parameterizations', self.instance.full_parameterizations if self.instance else [])
+            if not full_parameterizations:
+                raise serializers.ValidationError({'full_parameterizations': '请至少配置一条全参数化参数'})
+            attrs['request_params'] = {}
+            attrs['parameterizations'] = []
+            request_params = {}
+        else:
+            full_parameterizations = []
+            attrs['full_parameterizations'] = []
+            request_params = attrs.get(
+                'request_params', self.instance.request_params if self.instance else {}
+            )
         path = path.strip()
         attrs['path'] = path
 
-        candidates = ApiInterface.objects.filter(path=path).only('id', 'request_params')
+        candidates = ApiInterface.objects.filter(path=path).only('id', 'request_params', 'request_parameter_mode', 'full_parameterizations')
         if self.instance:
             candidates = candidates.exclude(pk=self.instance.pk)
-        if any(item.request_params == request_params for item in candidates):
+        if any(
+            item.request_parameter_mode == request_parameter_mode
+            and item.request_params == request_params
+            and normalize_full_parameterizations_for_compare(item.full_parameterizations) == full_parameterizations
+            for item in candidates
+        ):
             raise serializers.ValidationError('相同 URL 和请求参数的接口已存在，不允许重复加入')
         reference_enabled = attrs.get('reference_enabled', self.instance.reference_enabled if self.instance else False)
         reference_interface = attrs.get('reference_interface', self.instance.reference_interface if self.instance else None)
@@ -328,6 +428,7 @@ class AutomationTaskResultSerializer(serializers.ModelSerializer):
 
 class AutomationTaskSerializer(serializers.ModelSerializer):
     module_ids = serializers.PrimaryKeyRelatedField(source='modules', many=True, queryset=AutomationModule.objects.all(), write_only=True, required=False)
+    interface_ids = serializers.PrimaryKeyRelatedField(source='interfaces', many=True, queryset=ApiInterface.objects.filter(can_execute_in_task=True), required=False)
     app = serializers.SerializerMethodField()
     app_name = serializers.SerializerMethodField()
     module_name = serializers.SerializerMethodField()
@@ -371,6 +472,8 @@ class AutomationTaskSerializer(serializers.ModelSerializer):
 
     def get_interface_count(self, obj):
         # The task scope is known when it is created; execution details are written asynchronously.
+        if obj.task_type == 'scenario':
+            return obj.interfaces.filter(can_execute_in_task=True).count()
         module_names = self.get_module_names(obj)
         return ApiInterface.objects.filter(module_name__in=module_names, can_execute_in_task=True).count()
 
@@ -381,11 +484,40 @@ class AutomationTaskSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = AutomationTask
-        fields = ['id', 'name', 'module', 'module_ids', 'module_names', 'app', 'app_name', 'module_name', 'task_type', 'task_type_name', 'environment', 'environment_name', 'status', 'status_name', 'schedule', 'owner', 'owner_name', 'notification_status', 'notification_message', 'notified_at', 'interface_count', 'failure_count', 'execution_details', 'created_at', 'updated_at']
+        fields = ['id', 'name', 'module', 'module_ids', 'interface_ids', 'module_names', 'app', 'app_name', 'module_name', 'task_type', 'task_type_name', 'environment', 'environment_name', 'status', 'status_name', 'schedule', 'owner', 'owner_name', 'notification_status', 'notification_message', 'notified_at', 'interface_count', 'failure_count', 'execution_details', 'created_at', 'updated_at']
         read_only_fields = ['id', 'module_names', 'app', 'app_name', 'module_name', 'environment_name', 'owner_name', 'task_type_name', 'status_name', 'notification_status', 'notification_message', 'notified_at', 'interface_count', 'failure_count', 'execution_details', 'created_at', 'updated_at']
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
+        task_type = attrs.get('task_type', self.instance.task_type if self.instance else '')
+        interfaces = attrs.get('interfaces')
+        if task_type == 'scenario':
+            if interfaces is None:
+                interfaces = list(self.instance.interfaces.all()) if self.instance else []
+            if not interfaces:
+                raise serializers.ValidationError({'interface_ids': '请选择至少一个可执行接口'})
+            invalid_interfaces = [
+                item.name
+                for item in interfaces
+                if item.request_parameter_mode != 'full' or not item.full_parameterizations
+            ]
+            if invalid_interfaces:
+                names = '、'.join(invalid_interfaces[:3])
+                suffix = '等接口' if len(invalid_interfaces) > 3 else ''
+                raise serializers.ValidationError({
+                    'interface_ids': f'场景测试只能选择已配置全参数化参数的接口：{names}{suffix}'
+                })
+            module_names = {item.module_name for item in interfaces}
+            interface_apps = {'backend' if name == '后台' else 'frontend' for name in module_names}
+            if len(interface_apps) != 1:
+                raise serializers.ValidationError({'interface_ids': '场景测试接口必须归属同一所属端'})
+            interface_app = next(iter(interface_apps))
+            modules = list(AutomationModule.objects.filter(app=interface_app, name__in=module_names))
+            if len({item.name for item in modules}) != len(module_names):
+                raise serializers.ValidationError({'interface_ids': '场景测试接口的业务模块不存在'})
+            attrs['_interfaces'] = interfaces
+            attrs['_modules'] = modules
+            return attrs
         modules = attrs.get('modules')
         if self.instance:
             if modules is None:
@@ -399,20 +531,27 @@ class AutomationTaskSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         modules = validated_data.pop('_modules', validated_data.pop('modules', []))
+        interfaces = validated_data.pop('_interfaces', validated_data.pop('interfaces', []))
         validated_data.pop('modules', None)
+        validated_data.pop('interfaces', None)
         validated_data.pop('module', None)
         task = AutomationTask.objects.create(module=modules[0], **validated_data)
         task.modules.set(modules)
+        task.interfaces.set(interfaces)
         return task
 
     def update(self, instance, validated_data):
         modules = validated_data.pop('_modules', None)
+        interfaces = validated_data.pop('_interfaces', None)
         validated_data.pop('modules', None)
+        validated_data.pop('interfaces', None)
         task = super().update(instance, validated_data)
         if modules is not None:
             task.module = modules[0]
             task.save(update_fields=['module', 'updated_at'])
             task.modules.set(modules)
+        if interfaces is not None:
+            task.interfaces.set(interfaces)
         return task
 
 

@@ -3,6 +3,8 @@ import logging
 import random
 import re
 import ssl
+from copy import deepcopy
+from itertools import product
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urljoin
 from urllib.request import Request, urlopen
@@ -12,6 +14,7 @@ from django.db.models import Max
 from django.utils import timezone
 
 from .executor import api_request_executor
+from .common.login import build_login_headers, execute_platform_login, get_login_parameter_names, target_login_failure_message
 from .models import ApiInterface, AutomationTaskResult, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, User
 
 
@@ -19,6 +22,124 @@ logger = logging.getLogger(__name__)
 
 PARAMETER_PLACEHOLDER = re.compile(r'\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}')
 LEGACY_PARAMETER_PLACEHOLDER = re.compile(r'\$\{([A-Za-z_][A-Za-z0-9_]*)\}')
+CUSTOM_VALUE_PLACEHOLDER = re.compile(
+    r'\$\{([A-Za-z_][A-Za-z0-9_]*)'
+    r'((?:\.[A-Za-z_][A-Za-z0-9_]*|\[(?:\*|\d+(?:,\d+)*|\d*:\d*)\])*)\}'
+)
+CUSTOM_VALUE_ACCESSOR = re.compile(
+    r'\.([A-Za-z_][A-Za-z0-9_]*)|\[(\*|\d+(?:,\d+)*|\d*:\d*)\]'
+)
+
+
+def _json_string_content(value):
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    return json.dumps(text, ensure_ascii=False)[1:-1]
+
+
+def _stringify_custom_replacement(value):
+    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+
+
+def _select_custom_variable_value(name, accessor, variables):
+    if name not in variables:
+        raise KeyError(name)
+
+    nodes = [variables[name]]
+    is_multiple = False
+    position = 0
+    for match in CUSTOM_VALUE_ACCESSOR.finditer(accessor):
+        if match.start() != position:
+            raise ValueError(f'关联接口变量 {name}{accessor} 的取值表达式无效')
+        position = match.end()
+        field, selector = match.groups()
+        selected = []
+        if field is not None:
+            for item_index, node in enumerate(nodes):
+                if not isinstance(node, dict) or field not in node:
+                    location = f'第 {item_index + 1} 项' if is_multiple else '返回值'
+                    raise ValueError(f'关联接口变量 {name}{accessor} 的{location}不存在字段 {field}')
+                selected.append(node[field])
+        else:
+            for node in nodes:
+                if not isinstance(node, list):
+                    raise ValueError(f'关联接口变量 {name}{accessor} 使用数组选择时返回值必须是列表')
+                if selector == '*':
+                    selected.extend(node)
+                    is_multiple = True
+                elif ':' in selector:
+                    start_text, end_text = selector.split(':', 1)
+                    start = int(start_text) if start_text else None
+                    end = int(end_text) if end_text else None
+                    selected.extend(node[slice(start, end)])
+                    is_multiple = True
+                else:
+                    indexes = [int(index) for index in selector.split(',')]
+                    for index in indexes:
+                        if index >= len(node):
+                            raise ValueError(
+                                f'关联接口变量 {name}{accessor} 的数组下标 {index} 越界，当前共 {len(node)} 项'
+                            )
+                        selected.append(node[index])
+                    if len(indexes) > 1:
+                        is_multiple = True
+        nodes = selected
+
+    if position != len(accessor):
+        raise ValueError(f'关联接口变量 {name}{accessor} 的取值表达式无效')
+    return (nodes if is_multiple else nodes[0]), is_multiple
+
+
+def _is_inside_json_string(text, index):
+    in_string = False
+    escaped = False
+    for char in text[:index]:
+        if escaped:
+            escaped = False
+            continue
+        if char == '\\':
+            escaped = True
+            continue
+        if char == '"':
+            in_string = not in_string
+    return in_string
+
+
+def _resolve_full_custom_value(rule, variables):
+    template = str(rule.get('value', ''))
+    unresolved_names = set()
+    selected_multiple = False
+
+    def replace(match):
+        nonlocal selected_multiple
+        name = match.group(1)
+        accessor = match.group(2)
+        try:
+            value, is_multiple = _select_custom_variable_value(name, accessor, variables)
+        except KeyError:
+            unresolved_names.add(name)
+            return match.group(0)
+        selected_multiple = selected_multiple or is_multiple
+        return _json_string_content(value) if _is_inside_json_string(template, match.start()) else json.dumps(value, ensure_ascii=False)
+
+    rendered = CUSTOM_VALUE_PLACEHOLDER.sub(replace, template)
+    if unresolved_names:
+        names = '、'.join(sorted(unresolved_names))
+        raise ValueError(f"参数 {rule.get('path', '')} 存在未解析的关联接口变量：{names}")
+    try:
+        value = json.loads(rendered)
+    except (TypeError, ValueError):
+        def replace_as_text(match):
+            value, _ = _select_custom_variable_value(match.group(1), match.group(2), variables)
+            return _stringify_custom_replacement(value)
+
+        value = CUSTOM_VALUE_PLACEHOLDER.sub(replace_as_text, template)
+    expands_scenarios = bool(CUSTOM_VALUE_PLACEHOLDER.fullmatch(template) and selected_multiple)
+    return value, expands_scenarios
+
+
+def resolve_full_custom_value(rule, variables):
+    value, _ = _resolve_full_custom_value(rule, variables)
+    return value
 
 
 def replace_response_variables(value, variables):
@@ -42,6 +163,56 @@ def has_unresolved_response_variables(value):
     if isinstance(value, list):
         return any(has_unresolved_response_variables(item) for item in value)
     return isinstance(value, str) and '${' in value
+
+
+def collect_response_variable_placeholders(value):
+    names = set()
+    if isinstance(value, dict):
+        for item in value.values():
+            names.update(collect_response_variable_placeholders(item))
+        return names
+    if isinstance(value, list):
+        for item in value:
+            names.update(collect_response_variable_placeholders(item))
+        return names
+    if isinstance(value, str):
+        names.update(match.group(1) for match in CUSTOM_VALUE_PLACEHOLDER.finditer(value))
+    return names
+
+
+def interface_response_variable_placeholders(interface):
+    if interface.request_parameter_mode != 'full':
+        return collect_response_variable_placeholders(interface.request_params)
+    names = set()
+    for rule in interface.full_parameterizations or []:
+        if rule.get('value_mode') == 'fixed':
+            names.update(collect_response_variable_placeholders(rule.get('values', rule.get('value'))))
+        elif rule.get('variable_type') == 'custom':
+            names.update(collect_response_variable_placeholders(rule.get('value', '')))
+    return names
+
+
+def dependency_variable_block_message(interface, dependency_failures, extracted_variables_by_interface):
+    if not interface.reference_enabled or not interface.reference_interface_id:
+        return ''
+    expected_names = [
+        str(rule.get('name', '')).strip()
+        for rule in interface.response_extracts or []
+        if isinstance(rule, dict) and str(rule.get('name', '')).strip()
+    ]
+    used_names = sorted(set(expected_names) & interface_response_variable_placeholders(interface))
+    if not used_names:
+        return ''
+    dependency_name = interface.reference_interface.name if interface.reference_interface_id else ''
+    variable_names = '、'.join(used_names)
+    dependency_failure = dependency_failures.get(interface.reference_interface_id)
+    if dependency_failure:
+        return f'关联接口 {dependency_name or interface.reference_interface_id} 未通过，无法生成变量：{variable_names}。关联接口失败原因：{dependency_failure}'
+    extracted_variables = extracted_variables_by_interface.get(interface.id, {})
+    missing_names = [name for name in used_names if name not in extracted_variables]
+    if missing_names:
+        return f'关联接口 {dependency_name or interface.reference_interface_id} 未生成变量：{"、".join(missing_names)}，请检查返回值提取路径或关联接口响应'
+    return ''
 
 
 def generate_parameter_value(parameter_type, custom_value=''):
@@ -73,6 +244,81 @@ def build_parameter_variables(parameterizations):
             continue
         variables[item['name']] = generate_parameter_value(item.get('type', 'custom'), item.get('value', ''))
     return variables
+
+
+def _set_parameter_path(target, path, value):
+    segments = path.split('.')
+    current = target
+    for index, segment in enumerate(segments):
+        is_last = index == len(segments) - 1
+        if isinstance(current, list):
+            if not segment.isdigit():
+                raise ValueError(f'参数路径 {path} 的数组下标无效')
+            item_index = int(segment)
+            while len(current) <= item_index:
+                current.append(None)
+            if is_last:
+                current[item_index] = deepcopy(value)
+                return
+            next_value = [] if segments[index + 1].isdigit() else {}
+            if current[item_index] is None:
+                current[item_index] = next_value
+            current = current[item_index]
+            continue
+        if is_last:
+            current[segment] = deepcopy(value)
+            return
+        next_value = [] if segments[index + 1].isdigit() else {}
+        if segment not in current:
+            current[segment] = next_value
+        current = current[segment]
+
+
+def build_full_parameter_scenarios(interface, response_variables=None):
+    response_variables = response_variables or {}
+    scenario_rules, variable_rules = [], []
+    for rule in interface.full_parameterizations or []:
+        if rule.get('value_mode') == 'fixed':
+            values = rule.get('values')
+            if values is None and 'value' in rule:
+                values = [rule['value']]
+            if not isinstance(values, list) or not values:
+                raise ValueError(f"固定参数 {rule.get('path', '')} 没有可执行值")
+            scenario_rules.append((rule['path'], values))
+        elif rule.get('variable_type') == 'custom':
+            value, expands_scenarios = _resolve_full_custom_value(rule, response_variables)
+            if expands_scenarios:
+                if not value:
+                    raise ValueError(
+                        f"参数 {rule.get('path', '')} 使用 {rule.get('value', '')} 未提取到可执行值，关联接口返回列表为空"
+                    )
+                scenario_rules.append((rule['path'], value))
+            else:
+                variable_rules.append((rule, value))
+        else:
+            variable_rules.append((rule, None))
+
+    combinations = product(*(values for _, values in scenario_rules)) if scenario_rules else [()]
+    scenarios = []
+    for combination in combinations:
+        wrapped_params = {}
+        for (path, _), value in zip(scenario_rules, combination):
+            _set_parameter_path(wrapped_params, path, value)
+        for rule, resolved_value in variable_rules:
+            if rule.get('variable_type') == 'custom':
+                value = resolved_value
+            else:
+                value = generate_parameter_value(rule.get('variable_type', 'custom'), rule.get('value', ''))
+            _set_parameter_path(wrapped_params, rule['path'], value)
+        scenarios.append(api_request_executor.get_request_params(interface.method, wrapped_params))
+    return scenarios
+
+
+def build_interface_request_scenarios(interface, expand_full=False, response_variables=None):
+    if interface.request_parameter_mode == 'full':
+        scenarios = build_full_parameter_scenarios(interface, response_variables=response_variables)
+        return scenarios if expand_full else scenarios[:1]
+    return [api_request_executor.get_request_params(interface.method, interface.request_params)]
 
 
 def replace_parameter_variables(value, variables):
@@ -114,34 +360,14 @@ def build_request_url(base_url, path, method, request_params):
     return url
 
 
-def get_login_parameter_names(environment):
-    account_labels = {'账号', '用户名', '用户账号', '登录账号', '登录用户名', '账户', 'account', 'username'}
-    password_labels = {'密码', '登录密码', 'password'}
-    account_name = 'username'
-    password_name = 'password'
-    for variable in environment.variables or []:
-        if not isinstance(variable, dict):
-            continue
-        name = str(variable.get('key', '')).strip()
-        label = str(variable.get('value', '')).strip().lower()
-        if not name:
-            continue
-        if label in account_labels:
-            account_name = name
-        elif label in password_labels:
-            password_name = name
-    if account_name == password_name:
-        raise ValueError('环境配置中的登录账号参数名和密码参数名不能相同')
-    return account_name, password_name
-
-
-def target_login_failure_message(message):
-    detail = str(message or '').strip()
-    suffix = f' 原始信息：{detail}' if detail else ''
-    return f'目标系统登录失败，请检查目标系统登录账号和密码。{suffix}'
-
-
-def execute_task(task, operator: User, login_password: str, target_interface_id=None):
+def execute_task(
+    task,
+    operator: User,
+    login_password: str,
+    target_interface_id=None,
+    target_request_params=None,
+    login_timeout_seconds=10,
+):
     task.status = 'running'
     task.save(update_fields=['status', 'updated_at'])
     execution_no = (task.execution_details.aggregate(value=Max('execution_no'))['value'] or 0) + 1
@@ -164,16 +390,15 @@ def execute_task(task, operator: User, login_password: str, target_interface_id=
     except ValueError as exc:
         return finish_login_failure(task, execution_no, results, str(exc))
     login_encoding = 'multipart' if app == 'backend' else 'json'
-    login_headers = {'Content-Type': 'multipart/form-data'} if login_encoding == 'multipart' else {'Content-Type': 'application/json; charset=utf-8'}
-
-    login_outcome = api_request_executor.execute(
-        url=login_url,
-        method='POST',
-        headers=login_headers,
-        request_params={account_parameter: account, password_parameter: login_password},
-        assertions={'status_code': 200, 'timeout_seconds': 10},
+    login_headers = build_login_headers(login_encoding)
+    login_outcome = execute_platform_login(
         login_url=login_url,
-        request_encoding=login_encoding,
+        account=account,
+        password=login_password,
+        account_parameter=account_parameter,
+        password_parameter=password_parameter,
+        login_encoding=login_encoding,
+        login_timeout_seconds=login_timeout_seconds,
     )
     login_status = login_outcome.status if login_outcome.access_token else 'failed'
     login_message = login_outcome.message if login_outcome.access_token else target_login_failure_message(
@@ -187,7 +412,7 @@ def execute_task(task, operator: User, login_password: str, target_interface_id=
         path=login_url,
         headers=login_headers,
         request_params={account_parameter: account},
-        assertions={'status_code': 200, 'timeout_seconds': 10},
+        assertions={'status_code': 200, 'timeout_seconds': login_timeout_seconds},
         status=login_status,
         duration_ms=login_outcome.duration_ms,
         response_message=login_message,
@@ -204,9 +429,15 @@ def execute_task(task, operator: User, login_password: str, target_interface_id=
         if not target_interface:
             return finish_login_failure(task, execution_no, results, '重试接口已不存在')
         interfaces = [target_interface]
+        scenario_interface_ids = {target_interface.id} if task.task_type == 'scenario' else set()
+    elif task.task_type == 'scenario':
+        interfaces = list(task.interfaces.filter(can_execute_in_task=True).order_by('id'))
+        interfaces = [item for item in interfaces if not api_request_executor.is_login_url(item.path, login_url)]
+        scenario_interface_ids = {item.id for item in interfaces}
     else:
         interfaces = list(ApiInterface.objects.filter(module_name__in=module_names, can_execute_in_task=True).distinct())
         interfaces = [item for item in interfaces if not api_request_executor.is_login_url(item.path, login_url)]
+        scenario_interface_ids = set()
     ordered_interfaces = []
     added_ids = set()
 
@@ -227,52 +458,143 @@ def execute_task(task, operator: User, login_password: str, target_interface_id=
         add_with_dependencies(interface)
 
     response_variables = {}
+    extracted_variables_by_interface = {}
+    dependency_failures = {}
     for interface in ordered_interfaces:
-        request_params = api_request_executor.get_request_params(interface.method, interface.request_params)
-        # Resolve response variables first; parameterized values fill any remaining placeholders.
-        request_params = replace_response_variables(request_params, response_variables)
-        request_params = replace_parameter_variables(request_params, build_parameter_variables(interface.parameterizations))
-        url = build_request_url(task.environment.base_url, interface.path, interface.method, request_params)
-        result = AutomationTaskResult.objects.create(
-            task=task,
-            execution_no=execution_no,
-            source_interface_id=interface.id,
-            interface_name=interface.name,
-            method=interface.method,
-            path=url,
-            headers=interface.headers,
-            request_params=request_params,
-            assertions=interface.assertions,
-            status='running',
-            executed_at=timezone.now(),
-        )
-        if has_unresolved_response_variables(request_params):
-            outcome = type('MissingVariableOutcome', (), {'status': 'failed', 'duration_ms': 0, 'message': '请求参数中存在未解析的关联接口变量', 'response_log': '', 'access_token': ''})()
-        else:
-            outcome = api_request_executor.execute(
-                url=url,
-                method=interface.method,
-                headers=interface.headers,
-                request_params=request_params,
-                assertions=interface.assertions,
-                access_token=access_token,
-                login_url=login_url,
-                access_token_prefix='',
-                access_token_header='x-token' if app == 'backend' else 'authorization',
+        dependency_block_message = ''
+        if not (target_interface_id == interface.id and target_request_params is not None):
+            dependency_block_message = dependency_variable_block_message(
+                interface,
+                dependency_failures,
+                extracted_variables_by_interface,
             )
-        result.status = outcome.status
-        result.duration_ms = outcome.duration_ms
-        result.response_message = outcome.message
-        # Keep successful response bodies available for downstream interface variables.
-        result.response_log = outcome.response_log
-        result.save(update_fields=['status', 'duration_ms', 'response_message', 'response_log', 'updated_at'])
-        access_token = outcome.access_token or access_token
-        if outcome.status == 'passed':
-            # Extraction rules belong to the interfaces that consume this response.
-            for consumer in ordered_interfaces:
-                if consumer.reference_enabled and consumer.reference_interface_id == interface.id:
-                    response_variables.update(extract_response_variables(consumer, outcome.response_log))
-        results.append(result)
+        if dependency_block_message:
+            result = AutomationTaskResult.objects.create(
+                task=task,
+                execution_no=execution_no,
+                source_interface_id=interface.id,
+                interface_name=interface.name,
+                method=interface.method,
+                path=build_request_url(task.environment.base_url, interface.path, interface.method, {}),
+                headers=interface.headers,
+                request_params={},
+                assertions=interface.assertions,
+                status='failed',
+                duration_ms=0,
+                response_message=dependency_block_message,
+                response_log=dependency_block_message,
+                executed_at=timezone.now(),
+            )
+            results.append(result)
+            dependency_failures[interface.id] = dependency_block_message
+            continue
+        try:
+            if target_interface_id == interface.id and target_request_params is not None:
+                request_scenarios = [deepcopy(target_request_params)]
+            else:
+                request_scenarios = build_interface_request_scenarios(
+                    interface,
+                    expand_full=interface.id in scenario_interface_ids,
+                    response_variables=response_variables,
+                )
+        except ValueError as exc:
+            failure_message = str(exc)
+            result = AutomationTaskResult.objects.create(
+                task=task,
+                execution_no=execution_no,
+                source_interface_id=interface.id,
+                interface_name=interface.name,
+                method=interface.method,
+                path=build_request_url(task.environment.base_url, interface.path, interface.method, {}),
+                headers=interface.headers,
+                request_params={},
+                assertions=interface.assertions,
+                status='failed',
+                duration_ms=0,
+                response_message=failure_message,
+                response_log=failure_message,
+                executed_at=timezone.now(),
+            )
+            results.append(result)
+            dependency_failures[interface.id] = failure_message
+            continue
+        parameter_variables = build_parameter_variables(interface.parameterizations)
+        interface_passed = False
+        interface_failure_messages = []
+        for scenario_params in request_scenarios:
+            try:
+                # Resolve response variables first; template values fill any remaining placeholders.
+                request_params = replace_response_variables(scenario_params, response_variables)
+                request_params = replace_parameter_variables(request_params, parameter_variables)
+                url = build_request_url(task.environment.base_url, interface.path, interface.method, request_params)
+                result = AutomationTaskResult.objects.create(
+                    task=task,
+                    execution_no=execution_no,
+                    source_interface_id=interface.id,
+                    interface_name=interface.name,
+                    method=interface.method,
+                    path=url,
+                    headers=interface.headers,
+                    request_params=request_params,
+                    assertions=interface.assertions,
+                    status='running',
+                    executed_at=timezone.now(),
+                )
+                if has_unresolved_response_variables(request_params):
+                    outcome = type('MissingVariableOutcome', (), {'status': 'failed', 'duration_ms': 0, 'message': '请求参数中存在未解析的关联接口变量', 'response_log': '', 'access_token': ''})()
+                else:
+                    outcome = api_request_executor.execute(
+                        url=url,
+                        method=interface.method,
+                        headers=interface.headers,
+                        request_params=request_params,
+                        assertions=interface.assertions,
+                        access_token=access_token,
+                        login_url=login_url,
+                        access_token_prefix='',
+                        access_token_header='x-token' if app == 'backend' else 'authorization',
+                    )
+                result.status = outcome.status
+                result.duration_ms = outcome.duration_ms
+                result.response_message = outcome.message
+                # Keep successful response bodies available for downstream interface variables.
+                result.response_log = outcome.response_log
+                result.save(update_fields=['status', 'duration_ms', 'response_message', 'response_log', 'updated_at'])
+                access_token = outcome.access_token or access_token
+                if outcome.status == 'passed':
+                    interface_passed = True
+                    # Extraction rules belong to the interfaces that consume this response.
+                    for consumer in ordered_interfaces:
+                        if consumer.reference_enabled and consumer.reference_interface_id == interface.id:
+                            extracted_values = extract_response_variables(consumer, outcome.response_log)
+                            if extracted_values:
+                                extracted_variables_by_interface.setdefault(consumer.id, {}).update(extracted_values)
+                                response_variables.update(extracted_values)
+                else:
+                    interface_failure_messages.append(outcome.message)
+                results.append(result)
+            except ValueError as exc:
+                failure_message = str(exc)
+                result = AutomationTaskResult.objects.create(
+                    task=task,
+                    execution_no=execution_no,
+                    source_interface_id=interface.id,
+                    interface_name=interface.name,
+                    method=interface.method,
+                    path=build_request_url(task.environment.base_url, interface.path, interface.method, {}),
+                    headers=interface.headers,
+                    request_params={},
+                    assertions=interface.assertions,
+                    status='failed',
+                    duration_ms=0,
+                    response_message=failure_message,
+                    response_log=failure_message,
+                    executed_at=timezone.now(),
+                )
+                results.append(result)
+                interface_failure_messages.append(failure_message)
+        if not interface_passed and interface_failure_messages:
+            dependency_failures[interface.id] = interface_failure_messages[-1]
 
     return finish_task(task, results)
 
@@ -346,7 +668,14 @@ def retry_task_result(source, operator: User, login_password: str):
     interface = ApiInterface.objects.filter(pk=source.source_interface_id).first()
     if not interface:
         raise ValueError('原接口已不存在，无法获取最新接口信息进行重试')
-    results = execute_task(source.task, operator, login_password, target_interface_id=interface.id)
+    results = execute_task(
+        source.task,
+        operator,
+        login_password,
+        target_interface_id=interface.id,
+        target_request_params=source.request_params,
+        login_timeout_seconds=5,
+    )
     return next((item for item in reversed(results) if item.source_interface_id == interface.id), results[-1])
 
 

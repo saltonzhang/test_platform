@@ -1,4 +1,3 @@
-import base64
 import json
 from datetime import timedelta
 from urllib.parse import urlencode, urljoin
@@ -7,7 +6,7 @@ from django.utils import timezone
 
 from ..executor import api_request_executor
 from ..models import Environment
-from ..services import get_login_parameter_names, target_login_failure_message
+from ..common.login import execute_platform_login, extract_token_user_id, get_login_parameter_names, target_login_failure_message
 
 
 class DataFactoryError(Exception):
@@ -35,15 +34,6 @@ def _read_json(outcome):
         return _data(json.loads(outcome.response_log or '{}'))
     except (TypeError, ValueError) as exc:
         raise DataFactoryError('后台接口返回内容不是有效 JSON') from exc
-
-
-def _token_user_id(token):
-    try:
-        payload = token.split('.')[1] + '=='
-        data = json.loads(base64.urlsafe_b64decode(payload).decode('utf-8'))
-        return str(data.get('ID') or data.get('id') or data.get('userId') or '')
-    except (IndexError, TypeError, ValueError, UnicodeDecodeError):
-        return ''
 
 
 def _member_id(data):
@@ -78,21 +68,27 @@ def execute_account_balance(operator, password, environment_id, email, amount):
         raise DataFactoryError('请选择已配置后台登录地址的运行环境')
     if not operator.username:
         raise DataFactoryError('当前用户未配置后台账号')
-    account_key, password_key = get_login_parameter_names(environment)
-    login = api_request_executor.execute(
-        url=environment.login_url,
-        method='POST',
-        headers={'Content-Type': 'multipart/form-data'},
-        request_params={account_key: operator.username, password_key: password},
-        assertions={'status_code': 200, 'timeout_seconds': 10},
-        login_url=environment.login_url,
-        request_encoding='multipart',
-    )
+    try:
+        account_key, password_key = get_login_parameter_names(environment)
+    except ValueError as exc:
+        raise DataFactoryError(str(exc)) from exc
+    try:
+        login = execute_platform_login(
+            login_url=environment.login_url,
+            account=operator.username,
+            password=password,
+            account_parameter=account_key,
+            password_parameter=password_key,
+            login_encoding='multipart',
+            login_timeout_seconds=10,
+        )
+    except Exception as exc:
+        raise DataFactoryError(f'后台登录请求异常：{exc}') from exc
     if not login.access_token:
         raise DataFactoryError(target_login_failure_message(login.message))
 
     headers = {'Accept': 'application/json, text/plain, */*', 'X-Token': '', 'Content-Type': 'application/json'}
-    user_id = _token_user_id(login.access_token)
+    user_id = extract_token_user_id(login.access_token)
     if user_id:
         headers['X-User-Id'] = user_id
 
@@ -104,24 +100,29 @@ def execute_account_balance(operator, password, environment_id, email, amount):
         )
         return _read_json(outcome)
 
-    member = call('/api/v2/member/find', query={'user': email.split('@', 1)[0]})
-    member_id = _member_id(member)
-    if not member_id:
-        raise DataFactoryError('未找到该邮箱对应的 memberId')
+    try:
+        member = call('/api/v2/member/find', query={'user': email.split('@', 1)[0]})
+        member_id = _member_id(member)
+        if not member_id:
+            raise DataFactoryError('未找到该邮箱对应的 memberId')
 
-    call('/api/v2/fundAdjustment/create', 'POST', {
-        'accountType': 0, 'amount': float(amount), 'currency': 'BRL', 'memberId': member_id,
-        'type': 104, 'agent': '', 'accountCode': 'Cash1', 'remark': 'autotest',
-    })
-    now = timezone.localtime()
-    query = {
-        'page': 1, 'pageSize': 50, 'timezone': '+08:00', 'memberId': member_id,
-        'type': '-999', 'account': '-999', 'status': '-999',
-        'requestTimeStart': (now - timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%S.000Z'),
-        'requestTimeEnd': (now + timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%S.000Z'),
-    }
-    adjustment_id = _latest_adjustment_id(call('/api/v2/fundAdjustment/list', query=query), member_id)
-    if not adjustment_id:
-        raise DataFactoryError('加款单已创建，但未查询到可审批的最新单据')
-    call('/api/v2/fundAdjustment/audit', 'POST', {'id': adjustment_id, 'remark': 'autotest', 'status': 1})
-    return {'environment_name': environment.name, 'email': email, 'member_id': member_id, 'amount': str(amount), 'adjustment_id': adjustment_id, 'status': 'approved'}
+        call('/api/v2/fundAdjustment/create', 'POST', {
+            'accountType': 0, 'amount': float(amount), 'currency': 'BRL', 'memberId': member_id,
+            'type': 104, 'agent': '', 'accountCode': 'Cash1', 'remark': 'autotest',
+        })
+        now = timezone.localtime()
+        query = {
+            'page': 1, 'pageSize': 50, 'timezone': '+08:00', 'memberId': member_id,
+            'type': '-999', 'account': '-999', 'status': '-999',
+            'requestTimeStart': (now - timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%S.000Z'),
+            'requestTimeEnd': (now + timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%S.000Z'),
+        }
+        adjustment_id = _latest_adjustment_id(call('/api/v2/fundAdjustment/list', query=query), member_id)
+        if not adjustment_id:
+            raise DataFactoryError('加款单已创建，但未查询到可审批的最新单据')
+        call('/api/v2/fundAdjustment/audit', 'POST', {'id': adjustment_id, 'remark': 'autotest', 'status': 1})
+        return {'environment_name': environment.name, 'email': email, 'member_id': member_id, 'amount': str(amount), 'adjustment_id': adjustment_id, 'status': 'approved'}
+    except DataFactoryError:
+        raise
+    except Exception as exc:
+        raise DataFactoryError(f'账户余额执行异常：{exc}') from exc

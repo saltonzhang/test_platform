@@ -1,7 +1,7 @@
 import ast
 import json
 import re
-from urllib.parse import parse_qsl, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from .constants import BUSINESS_MODULE_NAMES
 
@@ -145,7 +145,9 @@ def _normalize_headers(headers):
 
 def _request_parts(url, method, options):
     parsed = urlsplit(url)
-    path = urlunsplit((parsed.scheme, parsed.netloc, parsed.path or '/', '', ''))
+    path = parsed.path or '/'
+    if not path.startswith('/'):
+        path = f'/{path}'
     query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
     query = {}
     for key, value in query_pairs:
