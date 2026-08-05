@@ -1,5 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import { auth } from './auth'
+import { auth, hasPermission } from './auth'
 
 const router = createRouter({ history:createWebHistory(), routes:[
   {path:'/login',component:()=>import('./views/LoginView.vue'),meta:{public:true}},
@@ -21,6 +21,32 @@ const router = createRouter({ history:createWebHistory(), routes:[
   ]},
   {path:'/:pathMatch(.*)*',redirect:'/'},
 ]})
-router.beforeEach(to => { if (!to.meta.public && !auth.token) return '/login'; if (to.path === '/login' && auth.token) return '/' })
+const dataFactoryPermissions=['data_factory.view','data_factory.account_add','data_factory.account_balance','data_factory.order_result_push','data_factory.rollback_settlement','data_factory.bet_cancel','data_factory.rollback_bet_cancel']
+function canAccessPage(path:string){
+  if(path==='/')return hasPermission('home.view')
+  if(path.startsWith('/intelligence'))return dataFactoryPermissions.some(hasPermission)
+  if(path.startsWith('/automation'))return hasPermission('automation.view')
+  const permissions:[string,string][]=[['/monitor/interfaces','monitor.api.view'],['/monitor/tasks','monitor.task.view'],['/monitor/alarms','monitor.alarm.view'],['/settings/environment','environment.view'],['/settings/users','users.view'],['/settings/roles','roles.view']]
+  const required=permissions.find(([route])=>path===route)?.[1]
+  return !required||hasPermission(required)
+}
+function firstAccessiblePath(){
+  return [
+    '/',
+    '/intelligence/data-factory',
+    '/automation/execution',
+    '/monitor/interfaces',
+    '/monitor/tasks',
+    '/monitor/alarms',
+    '/settings/environment',
+    '/settings/users',
+    '/settings/roles',
+  ].find(path=>canAccessPage(path))
+}
+router.beforeEach(to => {
+  if (!to.meta.public && !auth.token) return '/login'
+  if (to.path === '/login' && auth.token) return firstAccessiblePath()
+  if (!to.meta.public && !canAccessPage(to.path)) return firstAccessiblePath() || '/login'
+})
 router.afterEach(to => { document.title = `${String(to.meta.title || '登录')} · AIBET Auto` })
 export default router

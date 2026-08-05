@@ -21,9 +21,13 @@ ALLOWED_PERMISSIONS = {
     'data_factory.account_add',
     'data_factory.account_balance',
     'data_factory.order_result_push',
+    'data_factory.rollback_settlement',
+    'data_factory.bet_cancel',
+    'data_factory.rollback_bet_cancel',
 }
 
 PARAMETERIZATION_TYPES = {'name', 'time', 'location', 'phone', 'id_card', 'email', 'custom'}
+TIME_PARAMETER_FORMATS = {'timestamp', 'datetime', 'date', 'year_month', 'month_day', 'year'}
 FULL_PARAMETER_PATH = re.compile(r'^(?:query|body)\.(?:[A-Za-z_][A-Za-z0-9_]*|\d+)(?:\.(?:[A-Za-z_][A-Za-z0-9_]*|\d+))*$')
 FULL_CUSTOM_VALUE_PLACEHOLDER = re.compile(
     r'\$\{[A-Za-z_][A-Za-z0-9_]*'
@@ -62,6 +66,9 @@ def normalize_full_parameterizations_for_compare(value):
             if variable_type == 'custom':
                 if 'value' in item:
                     normalized_item['value'] = str(item.get('value', '')).strip()
+            elif variable_type == 'time':
+                normalized_item['time_format'] = str(item.get('time_format', 'date')).strip() or 'date'
+                normalized_item['time_offset'] = int(item.get('time_offset') or 0)
         normalized.append(normalized_item)
     return normalized
 
@@ -108,6 +115,21 @@ class UserCreateSerializer(UserSerializer):
         return User.objects.create_user(password=password, **validated_data)
 
 
+class UserEnvironmentAccountItemSerializer(serializers.Serializer):
+    environment_id = serializers.IntegerField()
+    account = serializers.CharField(max_length=100, allow_blank=True, trim_whitespace=True)
+
+
+class UserEnvironmentAccountUpdateSerializer(serializers.Serializer):
+    accounts = UserEnvironmentAccountItemSerializer(many=True)
+
+    def validate_accounts(self, value):
+        environment_ids = [item['environment_id'] for item in value]
+        if len(environment_ids) != len(set(environment_ids)):
+            raise serializers.ValidationError('同一运行环境只能配置一个账号')
+        return value
+
+
 class ResetPasswordSerializer(serializers.Serializer):
     new_password = serializers.CharField(min_length=6)
 
@@ -146,7 +168,7 @@ class DataFactoryExecutionSerializer(serializers.ModelSerializer):
     execution_content = serializers.SerializerMethodField()
 
     def get_execution_content(self, obj):
-        if obj.tool_name == '订单结果推送':
+        if obj.tool_name in {'订单结果推送', '回滚结算', '取消', '回滚取消'}:
             content = {'事件 ID': obj.email, '市场 ID': obj.adjustment_id, '消息 Key': obj.member_id, '执行结果': obj.get_status_display()}
             if obj.message:
                 content['信息'] = obj.message
@@ -220,8 +242,20 @@ class ApiInterfaceSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(f'不支持的参数化类型：{kind}')
             if kind == 'custom' and not str(item.get('value', '')).strip():
                 raise serializers.ValidationError(f'自定义参数 {name} 必须填写值')
+            normalized_item = {'name': name, 'type': kind}
+            if kind == 'custom':
+                normalized_item['value'] = item.get('value', '')
+            if kind == 'time':
+                time_format = str(item.get('time_format', 'date')).strip() or 'date'
+                if time_format not in TIME_PARAMETER_FORMATS:
+                    raise serializers.ValidationError(f'参数化变量 {name} 的时间格式无效')
+                try:
+                    time_offset = int(item.get('time_offset') or 0)
+                except (TypeError, ValueError) as exc:
+                    raise serializers.ValidationError(f'参数化变量 {name} 的加减天数必须是整数') from exc
+                normalized_item.update({'time_format': time_format, 'time_offset': time_offset})
             names.add(name)
-            normalized.append({'name': name, 'type': kind, **({'value': item.get('value', '')} if kind == 'custom' else {})})
+            normalized.append(normalized_item)
         return normalized
 
     def validate_request_parameter_mode(self, value):
@@ -261,6 +295,15 @@ class ApiInterfaceSerializer(serializers.ModelSerializer):
                 if variable_type == 'custom':
                     custom_value = validate_custom_value_template(parameter_path, item.get('value', ''))
                     normalized_item['value'] = custom_value
+                if variable_type == 'time':
+                    time_format = str(item.get('time_format', 'date')).strip() or 'date'
+                    if time_format not in TIME_PARAMETER_FORMATS:
+                        raise serializers.ValidationError(f'参数 {parameter_path} 的时间格式无效')
+                    try:
+                        time_offset = int(item.get('time_offset') or 0)
+                    except (TypeError, ValueError) as exc:
+                        raise serializers.ValidationError(f'参数 {parameter_path} 的加减天数必须是整数') from exc
+                    normalized_item.update({'time_format': time_format, 'time_offset': time_offset})
             paths.add(parameter_path)
             normalized.append(normalized_item)
         return normalized

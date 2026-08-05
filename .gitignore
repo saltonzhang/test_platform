@@ -10,6 +10,7 @@ dataapi
 new_aibet
 test_aibetauto.sql
 new/
+08-05/
 
 # Dependencies and generated files
 **/node_modules/

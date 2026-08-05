@@ -3,6 +3,7 @@ from datetime import timedelta
 from urllib.parse import urlencode, urljoin
 
 from django.utils import timezone
+from django.conf import settings
 
 from ..executor import api_request_executor
 from ..models import Environment
@@ -62,12 +63,27 @@ def _latest_adjustment_id(data, member_id):
     return ''
 
 
-def execute_account_balance(operator, password, environment_id, email, amount):
+def get_data_factory_credentials(environment_type):
+    """Return the configured credentials for the platform role used by a tool."""
+    credentials = {
+        'frontend': (settings.DATA_FACTORY_FRONTEND_ACCOUNT, settings.DATA_FACTORY_FRONTEND_PASSWORD),
+        'backend': (settings.DATA_FACTORY_BACKEND_ACCOUNT, settings.DATA_FACTORY_BACKEND_PASSWORD),
+    }
+    account, password = credentials.get(environment_type, ('', ''))
+    if not account or not password:
+        names = {
+            'frontend': 'DATA_FACTORY_FRONTEND_ACCOUNT 和 DATA_FACTORY_FRONTEND_PASSWORD',
+            'backend': 'DATA_FACTORY_BACKEND_ACCOUNT 和 DATA_FACTORY_BACKEND_PASSWORD',
+        }
+        raise DataFactoryError(f'请配置 {names.get(environment_type, "有效的数据工厂环境账号密码")}')
+    return account, password
+
+
+def execute_account_balance(environment_id, email, amount):
     environment = Environment.objects.filter(pk=environment_id).first()
     if not environment or not environment.login_url:
         raise DataFactoryError('请选择已配置后台登录地址的运行环境')
-    if not operator.username:
-        raise DataFactoryError('当前用户未配置后台账号')
+    account, password = get_data_factory_credentials('backend')
     try:
         account_key, password_key = get_login_parameter_names(environment)
     except ValueError as exc:
@@ -75,7 +91,7 @@ def execute_account_balance(operator, password, environment_id, email, amount):
     try:
         login = execute_platform_login(
             login_url=environment.login_url,
-            account=operator.username,
+            account=account,
             password=password,
             account_parameter=account_key,
             password_parameter=password_key,

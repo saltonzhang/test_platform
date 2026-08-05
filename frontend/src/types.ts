@@ -4,17 +4,21 @@ export interface Role { id:number; name:string; code:string; description:string;
 export interface User { id:number; username:string; name:string; email:string; role:string; role_name:string; permissions:string[]; is_active:boolean; created_at:string }
 export interface EnvironmentVariable { key:string; value:string; description?:string }
 export interface Environment { id:number; name:string; description:string; base_url:string; login_url:string; variables:EnvironmentVariable[]; is_default:boolean; created_at:string }
+export interface EnvironmentAccount { environment_id:number; environment_name:string; account:string }
+export interface EnvironmentAccountOption { id:number; name:string }
+export interface EnvironmentAccountSettings { accounts:EnvironmentAccount[]; environments:EnvironmentAccountOption[] }
 export interface LoginResult { access:string; refresh:string; user:User }
 export interface AccountBalanceResult { environment_name:string; email:string; member_id:string; amount:string; adjustment_id:string; status:string }
 export interface AccountAddResult { execution_id?:number; environment_name:string; frontend_environment_name:string; backend_environment_name:string; email:string; amount:string; quantity:number; status:string; member_id?:string; adjustment_id?:string }
-export interface OrderResultPushResult { key:string; event_id:string; outcome_id:string; timestamp:number; status_code:number; message:string; response:string; payload:Record<string,unknown> }
+export interface OrderResultPushResult { key:string; event_id:string; outcome_id?:string; timestamp:number; status_code:number; message:string; response:string; payload:Record<string,unknown> }
 export interface DataFactoryExecution { id:number; tool_name:string; operator_name:string; execution_content:Record<string,string>; executed_at:string }
 export type AutomationApp = 'frontend'|'backend'
 export interface AutomationModule { id:number; app:AutomationApp; app_name:string; name:string; sort_order:number; task_count:number }
 export interface ApiResponseExtract { name:string; path:string }
-export interface ApiParameterization { name:string; type:'name'|'time'|'location'|'phone'|'id_card'|'email'|'custom'; value?:string }
+export type ApiTimeFormat = 'timestamp'|'datetime'|'date'|'year_month'|'month_day'|'year'
+export interface ApiParameterization { name:string; type:'name'|'time'|'location'|'phone'|'id_card'|'email'|'custom'; value?:string; time_format?:ApiTimeFormat; time_offset?:number }
 export type ApiParameterType = ApiParameterization['type']
-export interface ApiFullParameterization { path:string; value_mode:'fixed'|'variable'; values?:unknown[]; value?:unknown; variable_type?:ApiParameterType }
+export interface ApiFullParameterization { path:string; value_mode:'fixed'|'variable'; values?:unknown[]; value?:unknown; variable_type?:ApiParameterType; time_format?:ApiTimeFormat; time_offset?:number }
 export interface ApiInterface { id:number; name:string; method:string; path:string; module_name:string; api_type:string; description:string; headers:Record<string,unknown>; request_params:Record<string,unknown>; parameterizations:ApiParameterization[]; request_parameter_mode:'template'|'full'; full_parameterizations:ApiFullParameterization[]; assertions:Record<string,unknown>; reference_enabled:boolean; reference_interface:number|null; reference_interface_name:string; response_extracts:ApiResponseExtract[]; can_execute_in_task:boolean; created_by_name:string; created_at:string; updated_at:string }
 export interface AutomationTaskResult { id:number; execution_no:number; source_interface_id:number|null; interface_name:string; method:string; path:string; headers:Record<string,unknown>; request_params:Record<string,unknown>; assertions:Record<string,unknown>; status:string; status_name:string; duration_ms:number|null; response_message:string; response_log:string; executed_at:string|null }
 export interface AutomationTask { id:number; name:string; module:number|null; module_ids:number[]; interface_ids:number[]; module_names:string[]; app:AutomationApp; app_name:string; module_name:string; task_type:string; task_type_name:string; environment:number; environment_name:string; status:string; status_name:string; schedule:string; owner:number; owner_name:string; notification_status:string; notification_message:string; notified_at:string|null; interface_count:number; failure_count:number; execution_details:AutomationTaskResult[]; created_at:string; updated_at:string }

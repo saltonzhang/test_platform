@@ -14,7 +14,7 @@
       <el-table-column label="状态" width="90"><template #default="{row}"><el-tag :type="row.status==='handled'?'success':'danger'">{{row.status_name}}</el-tag></template></el-table-column>
       <el-table-column label="报警时间" width="155"><template #default="{row}">{{formatTime(row.created_at)}}</template></el-table-column>
       <el-table-column label="处理人" width="110"><template #default="{row}">{{row.handled_by_name||'-'}}</template></el-table-column>
-      <el-table-column label="操作" width="150" fixed="right"><template #default="{row}"><el-button link type="primary" @click="openDetail(row)">详情</el-button><el-button link :type="row.status==='handled'?'warning':'success'" @click="toggleStatus(row)">{{row.status==='handled'?'重新打开':'标记处理'}}</el-button></template></el-table-column>
+      <el-table-column label="操作" width="150" fixed="right"><template #default="{row}"><el-button link type="primary" @click="openDetail(row)">详情</el-button><el-button v-if="hasPermission('monitor.alarm.handle')" link :type="row.status==='handled'?'warning':'success'" @click="toggleStatus(row)">{{row.status==='handled'?'重新打开':'标记处理'}}</el-button></template></el-table-column>
     </el-table>
     <el-pagination v-model:current-page="query.page" :total="total" :page-size="10" layout="total, prev, pager, next" @current-change="load"/>
   </section>
@@ -37,12 +37,12 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted,onUnmounted,reactive,ref } from 'vue';import { ElMessage } from 'element-plus';import dayjs from 'dayjs';import * as api from '@/api';import { installOverflowTooltip } from '@/overflowTooltip';import type { MonitorAlarm } from '@/types'
+import { onMounted,onUnmounted,reactive,ref } from 'vue';import { ElMessage } from 'element-plus';import dayjs from 'dayjs';import { hasPermission } from '@/auth';import * as api from '@/api';import { installOverflowTooltip } from '@/overflowTooltip';import type { MonitorAlarm } from '@/types'
 const alarms=ref<MonitorAlarm[]>([]),total=ref(0),loading=ref(false),detailVisible=ref(false),current=ref<MonitorAlarm|null>(null),query=reactive({keyword:'',status:'',level:'',page:1})
 async function load(){loading.value=true;try{const res=await api.getMonitorAlarms({...query,pageSize:10});alarms.value=res.data.list;total.value=res.data.total}catch(e){ElMessage.error((e as Error).message)}finally{loading.value=false}}
 function filterData(){query.page=1;void load()}
 function openDetail(row:MonitorAlarm){current.value=row;detailVisible.value=true}
-async function toggleStatus(row:MonitorAlarm){try{const nextStatus=row.status==='handled'?'open':'handled';await api.updateMonitorAlarm(row.id,{status:nextStatus});await load();ElMessage.success(nextStatus==='handled'?'报警已处理':'报警已重新打开')}catch(e){ElMessage.error((e as Error).message)}}
+async function toggleStatus(row:MonitorAlarm){if(!hasPermission('monitor.alarm.handle'))return;try{const nextStatus=row.status==='handled'?'open':'handled';await api.updateMonitorAlarm(row.id,{status:nextStatus});await load();ElMessage.success(nextStatus==='handled'?'报警已处理':'报警已重新打开')}catch(e){ElMessage.error((e as Error).message)}}
 function formatTime(value:string){return dayjs(value).format('YYYY-MM-DD HH:mm:ss')}
 let removeOverflowTooltip=()=>{}
 onMounted(()=>{removeOverflowTooltip=installOverflowTooltip();void load()})

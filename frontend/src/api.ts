@@ -1,7 +1,7 @@
 import axios from 'axios'
 import { clearAuth, auth } from './auth'
 import router from './router'
-import type { AccountAddResult, AccountBalanceResult, ApiInterface, ApiResponse, AutomationModule, AutomationTask, AutomationTaskResult, DashboardStats, DataFactoryExecution, Environment, LoginResult, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorTask, OrderResultPushResult, PageResult, Role, User } from './types'
+import type { AccountAddResult, AccountBalanceResult, ApiInterface, ApiResponse, AutomationModule, AutomationTask, AutomationTaskResult, DashboardStats, DataFactoryExecution, Environment, EnvironmentAccountSettings, LoginResult, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorTask, OrderResultPushResult, PageResult, Role, User } from './types'
 
 const request = axios.create({ baseURL:'/api', timeout:15000 })
 request.interceptors.request.use(config => { if (auth.token) config.headers.Authorization = `Bearer ${auth.token}`; return config })
@@ -12,14 +12,21 @@ request.interceptors.response.use(response => response.data, error => {
 
 export const login = (data:{username:string;password:string}) => request.post<never,ApiResponse<LoginResult>>('/auth/login/', data)
 export const getMe = () => request.get<never,ApiResponse<User>>('/auth/me/')
+export const getMyEnvironmentAccounts = () => request.get<never,ApiResponse<EnvironmentAccountSettings>>('/me/environment-accounts/')
+export const saveMyEnvironmentAccounts = (accounts:{environment_id:number;account:string}[]) => request.put<never,ApiResponse<EnvironmentAccountSettings>>('/me/environment-accounts/', {accounts})
 export const getDashboard = () => request.get<never,ApiResponse<DashboardStats>>('/dashboard/')
-export const executeAccountBalance = (data:{environment:number;email:string;amount:number;login_password:string}) => request.post<never,ApiResponse<AccountBalanceResult>>('/data-factory/account-balance/',data)
-export const executeAccountAdd = (data:{frontend_environment:number;backend_environment:number;email:string;amount:number|null;quantity:number;login_password:string}) => request.post<never,ApiResponse<AccountAddResult>>('/data-factory/account-add/',data)
+export const executeAccountBalance = (data:{environment:number;email:string;amount:number}) => request.post<never,ApiResponse<AccountBalanceResult>>('/data-factory/account-balance/',data)
+export const executeAccountAdd = (data:{frontend_environment:number;backend_environment:number;email:string;amount:number|null;quantity:number}) => request.post<never,ApiResponse<AccountAddResult>>('/data-factory/account-add/',data)
 export const pushOrderResult = (data:Record<string,string|number>) => request.post<never,ApiResponse<OrderResultPushResult>>('/data-factory/order-result-push/',data)
+export const cancelBet = (data:{product:string|number;event_id:string;market_id:string|number;specifiers?:string;start_time?:string;end_time?:string;timestamp?:number|string}) => request.post<never,ApiResponse<OrderResultPushResult>>('/data-factory/bet-cancel/',data)
+export const rollbackBetCancel = (data:{product:string|number;event_id:string;market_id:string|number;specifiers?:string;start_time?:string;end_time?:string;timestamp?:number|string}) => request.post<never,ApiResponse<OrderResultPushResult>>('/data-factory/rollback-bet-cancel/',data)
+export const rollbackSettlement = (data:Record<string,string|number>) => request.post<never,ApiResponse<OrderResultPushResult>>('/data-factory/rollback-settlement/',data)
+export const getDataFactoryEnvironments = () => request.get<never,ApiResponse<Environment[]>>('/data-factory/environments/')
 export const getDataFactoryExecutions = (params:Record<string,unknown>) => request.get<never,ApiResponse<PageResult<DataFactoryExecution>>>('/data-factory/executions/',{params})
 export const getUsers = (params:Record<string,unknown>) => request.get<never,ApiResponse<PageResult<User>>>('/users/', {params})
 export const createUser = (data:Record<string,unknown>) => request.post<never,ApiResponse<User>>('/users/', data)
 export const updateUser = (id:number,data:Record<string,unknown>) => request.patch<never,ApiResponse<User>>(`/users/${id}/`,data)
+export const toggleUserStatus = (id:number,isActive:boolean) => request.post<never,ApiResponse<User>>(`/users/${id}/toggle-status/`,{is_active:isActive})
 export const deleteUser = (id:number) => request.delete<never,ApiResponse<null>>(`/users/${id}/`)
 export const changePassword = (id:number,newPassword:string) => request.post<never,ApiResponse<null>>(`/users/${id}/reset-password/`,{new_password:newPassword})
 export const getRoles = (params:Record<string,unknown>={}) => request.get<never,ApiResponse<PageResult<Role>>>('/roles/',{params})

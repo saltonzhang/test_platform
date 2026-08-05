@@ -15,7 +15,7 @@ from django.utils import timezone
 
 from .executor import api_request_executor
 from .common.login import build_login_headers, execute_platform_login, get_login_parameter_names, target_login_failure_message
-from .models import ApiInterface, AutomationTaskResult, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, User
+from .models import ApiInterface, AutomationTaskResult, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, User, UserEnvironmentAccount
 
 
 logger = logging.getLogger(__name__)
@@ -215,11 +215,35 @@ def dependency_variable_block_message(interface, dependency_failures, extracted_
     return ''
 
 
-def generate_parameter_value(parameter_type, custom_value=''):
+def _parameter_time_offset(config):
+    try:
+        return int((config or {}).get('time_offset') or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def generate_time_parameter_value(config=None):
+    config = config or {}
+    current = timezone.now() + timezone.timedelta(days=_parameter_time_offset(config))
+    time_format = str(config.get('time_format', 'date') or 'date')
+    if time_format == 'timestamp':
+        return int(current.timestamp())
+    if time_format == 'datetime':
+        return current.strftime('%Y-%m-%d %H:%M:%S')
+    if time_format == 'year_month':
+        return current.strftime('%Y-%m')
+    if time_format == 'month_day':
+        return current.strftime('%m-%d')
+    if time_format == 'year':
+        return current.strftime('%Y')
+    return current.strftime('%Y-%m-%d')
+
+
+def generate_parameter_value(parameter_type, custom_value='', config=None):
     if parameter_type == 'name':
         return random.choice(('张伟', '李娜', '王强', '陈静', '刘洋', '赵敏', '黄俊', '周倩'))
     if parameter_type == 'time':
-        return timezone.now().isoformat()
+        return generate_time_parameter_value(config)
     if parameter_type == 'location':
         return random.choice(('北京', '上海', '广州', '深圳', '杭州', '成都', '武汉', '重庆'))
     if parameter_type == 'phone':
@@ -242,7 +266,7 @@ def build_parameter_variables(parameterizations):
     for item in parameterizations or []:
         if not isinstance(item, dict) or not item.get('name'):
             continue
-        variables[item['name']] = generate_parameter_value(item.get('type', 'custom'), item.get('value', ''))
+        variables[item['name']] = generate_parameter_value(item.get('type', 'custom'), item.get('value', ''), item)
     return variables
 
 
@@ -308,7 +332,7 @@ def build_full_parameter_scenarios(interface, response_variables=None):
             if rule.get('variable_type') == 'custom':
                 value = resolved_value
             else:
-                value = generate_parameter_value(rule.get('variable_type', 'custom'), rule.get('value', ''))
+                value = generate_parameter_value(rule.get('variable_type', 'custom'), rule.get('value', ''), rule)
             _set_parameter_path(wrapped_params, rule['path'], value)
         scenarios.append(api_request_executor.get_request_params(interface.method, wrapped_params))
     return scenarios
@@ -379,12 +403,14 @@ def execute_task(
     results = []
     access_token = ''
 
-    account = operator.email if app == 'frontend' else operator.username
+    account = UserEnvironmentAccount.objects.filter(
+        user=operator, environment=task.environment,
+    ).values_list('account', flat=True).first() or ''
+    account = account.strip()
     if not login_url:
         return finish_login_failure(task, execution_no, results, '运行环境未配置登录地址')
     if not account:
-        account_label = '邮箱' if app == 'frontend' else '账号'
-        return finish_login_failure(task, execution_no, results, f'当前用户未配置{account_label}')
+        return finish_login_failure(task, execution_no, results, f'当前用户未配置环境“{task.environment.name}”的目标系统账号')
     try:
         account_parameter, password_parameter = get_login_parameter_names(task.environment)
     except ValueError as exc:

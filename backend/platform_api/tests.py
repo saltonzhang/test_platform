@@ -1,12 +1,17 @@
+import os
 import json
+from datetime import datetime
 from decimal import Decimal
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
 from django.urls import reverse
+from django.test import SimpleTestCase, override_settings
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from .models import ApiInterface, AutomationModule, AutomationTask, AutomationTaskResult, DataFactoryExecution, Environment, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorTask, Role, User
+from .models import ApiInterface, AutomationModule, AutomationTask, AutomationTaskResult, DataFactoryExecution, Environment, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorTask, Role, User, UserEnvironmentAccount
 from .executor import api_request_executor
 from .interface_import import parse_fetch_text
 from .serializers import AutomationTaskSerializer, DataFactoryExecutionSerializer
@@ -34,6 +39,353 @@ class JsonFakeHttpResponse(FakeHttpResponse):
         return json.dumps(self.body).encode('utf-8')
 
 
+class DatabaseConfigTests(SimpleTestCase):
+    def test_legacy_database_config_is_used_without_profile(self):
+        from platform_api.common.database import get_database_config
+
+        with patch.dict(os.environ, {
+            'DATA_FACTORY_DB_PROFILE': '',
+            'DATA_FACTORY_DB_HOST': 'legacy-host',
+            'DATA_FACTORY_DB_PORT': '3306',
+            'DATA_FACTORY_DB_USER': 'legacy-user',
+            'DATA_FACTORY_DB_PASSWORD': 'legacy-pass',
+            'DATA_FACTORY_DB_NAME': 'legacy_db',
+            'DATA_FACTORY_DB_CHARSET': 'utf8mb4',
+            'DATA_FACTORY_DB_CONNECT_TIMEOUT': '11',
+            'DATA_FACTORY_DB_READ_TIMEOUT': '22',
+            'DATA_FACTORY_DB_WRITE_TIMEOUT': '33',
+        }, clear=False):
+            config = get_database_config()
+
+        self.assertEqual(config['host'], 'legacy-host')
+        self.assertEqual(config['port'], 3306)
+        self.assertEqual(config['user'], 'legacy-user')
+        self.assertEqual(config['password'], 'legacy-pass')
+        self.assertEqual(config['database'], 'legacy_db')
+        self.assertEqual(config['charset'], 'utf8mb4')
+        self.assertEqual(config['connect_timeout'], 11)
+        self.assertEqual(config['read_timeout'], 22)
+        self.assertEqual(config['write_timeout'], 33)
+        self.assertEqual(config['cursorclass'].__name__, 'DictCursor')
+
+    def test_profile_database_config_is_selected_from_env(self):
+        from platform_api.common.database import get_database_config
+
+        with patch.dict(os.environ, {
+            'DATA_FACTORY_DB_PROFILE': 'report',
+            'DATA_FACTORY_DB_REPORT_HOST': 'report-host',
+            'DATA_FACTORY_DB_REPORT_PORT': '3307',
+            'DATA_FACTORY_DB_REPORT_USER': 'report-user',
+            'DATA_FACTORY_DB_REPORT_PASSWORD': 'report-pass',
+            'DATA_FACTORY_DB_REPORT_NAME': 'report_db',
+            'DATA_FACTORY_DB_REPORT_CONNECT_TIMEOUT': '7',
+        }, clear=False):
+            config = get_database_config()
+
+        self.assertEqual(config['host'], 'report-host')
+        self.assertEqual(config['port'], 3307)
+        self.assertEqual(config['user'], 'report-user')
+        self.assertEqual(config['password'], 'report-pass')
+        self.assertEqual(config['database'], 'report_db')
+        self.assertEqual(config['connect_timeout'], 7)
+
+    def test_explicit_profile_argument_overrides_environment_profile(self):
+        from platform_api.common.database import get_database_config
+
+        with patch.dict(os.environ, {
+            'DATA_FACTORY_DB_PROFILE': 'report',
+            'DATA_FACTORY_DB_REPORT_HOST': 'report-host',
+            'DATA_FACTORY_DB_REPORT_PORT': '3307',
+            'DATA_FACTORY_DB_REPORT_USER': 'report-user',
+            'DATA_FACTORY_DB_REPORT_PASSWORD': 'report-pass',
+            'DATA_FACTORY_DB_REPORT_NAME': 'report_db',
+            'DATA_FACTORY_DB_AUDIT_HOST': 'audit-host',
+            'DATA_FACTORY_DB_AUDIT_PORT': '3308',
+            'DATA_FACTORY_DB_AUDIT_USER': 'audit-user',
+            'DATA_FACTORY_DB_AUDIT_PASSWORD': 'audit-pass',
+            'DATA_FACTORY_DB_AUDIT_NAME': 'audit_db',
+        }, clear=False):
+            config = get_database_config(profile='audit')
+
+        self.assertEqual(config['host'], 'audit-host')
+        self.assertEqual(config['port'], 3308)
+        self.assertEqual(config['user'], 'audit-user')
+        self.assertEqual(config['password'], 'audit-pass')
+        self.assertEqual(config['database'], 'audit_db')
+
+    def test_missing_profile_fields_raise_clear_error(self):
+        from platform_api.common.database import get_database_config
+
+        with patch.dict(os.environ, {
+            'DATA_FACTORY_DB_PROFILE': 'broken',
+            'DATA_FACTORY_DB_BROKEN_HOST': 'broken-host',
+        }, clear=False):
+            with self.assertRaises(RuntimeError) as ctx:
+                get_database_config()
+
+        self.assertIn('DATA_FACTORY_DB_BROKEN_PORT', str(ctx.exception))
+        self.assertIn('profile=broken', str(ctx.exception))
+
+    @patch('platform_api.common.database.pymysql.connect')
+    def test_get_db_connection_uses_explicit_profile(self, mocked_connect):
+        from platform_api.common.database import get_db_connection
+
+        mocked_connect.return_value = object()
+        with patch.dict(os.environ, {
+            'DATA_FACTORY_DB_PROFILE': 'report',
+            'DATA_FACTORY_DB_REPORT_HOST': 'report-host',
+            'DATA_FACTORY_DB_REPORT_PORT': '3307',
+            'DATA_FACTORY_DB_REPORT_USER': 'report-user',
+            'DATA_FACTORY_DB_REPORT_PASSWORD': 'report-pass',
+            'DATA_FACTORY_DB_REPORT_NAME': 'report_db',
+            'DATA_FACTORY_DB_AUDIT_HOST': 'audit-host',
+            'DATA_FACTORY_DB_AUDIT_PORT': '3308',
+            'DATA_FACTORY_DB_AUDIT_USER': 'audit-user',
+            'DATA_FACTORY_DB_AUDIT_PASSWORD': 'audit-pass',
+            'DATA_FACTORY_DB_AUDIT_NAME': 'audit_db',
+        }, clear=False):
+            get_db_connection(profile='audit')
+
+        mocked_connect.assert_called_once()
+        self.assertEqual(mocked_connect.call_args.kwargs['host'], 'audit-host')
+        self.assertEqual(mocked_connect.call_args.kwargs['port'], 3308)
+        self.assertEqual(mocked_connect.call_args.kwargs['database'], 'audit_db')
+
+
+class DataFactoryCredentialTests(SimpleTestCase):
+    @override_settings(
+        DATA_FACTORY_FRONTEND_ACCOUNT='frontend-account',
+        DATA_FACTORY_FRONTEND_PASSWORD='frontend-password',
+        DATA_FACTORY_BACKEND_ACCOUNT='backend-account',
+        DATA_FACTORY_BACKEND_PASSWORD='backend-password',
+    )
+    def test_data_factory_credentials_are_selected_by_environment_type(self):
+        from platform_api.data_factory.account_balance import get_data_factory_credentials
+
+        self.assertEqual(get_data_factory_credentials('frontend'), ('frontend-account', 'frontend-password'))
+        self.assertEqual(get_data_factory_credentials('backend'), ('backend-account', 'backend-password'))
+
+
+class DataFactoryAccountAddKycTests(SimpleTestCase):
+    @patch('platform_api.data_factory.account_add.requests.post')
+    @patch('platform_api.data_factory.account_add.query_one', side_effect=RuntimeError('missing db config'))
+    def test_data_factory_account_add_member_lookup_error_stops_registration(self, mocked_query_one, mocked_post):
+        from platform_api.data_factory.account_add import DataFactoryError, _run_single_account
+
+        frontend_environment = SimpleNamespace(
+            name='账户添加前台查询异常',
+            base_url='https://api-test.helix.city',
+        )
+        backend_environment = SimpleNamespace(
+            name='账户添加后台查询异常',
+            base_url='https://mgt-api-test.helix.city',
+            login_url='https://mgt-api-test.helix.city/api/v2/login',
+            id=99,
+        )
+        operator = SimpleNamespace(username='admin')
+
+        with self.assertRaisesMessage(DataFactoryError, '查询账号是否存在时出错'):
+            _run_single_account(
+                frontend_environment,
+                backend_environment,
+                username='admin',
+                password='target-login-pass',
+                email='colin7672@proton.me',
+                amount=Decimal('7'),
+                operator=operator,
+            )
+
+        mocked_query_one.assert_called_once_with(
+            'SELECT id FROM member WHERE email = %s LIMIT 1',
+            ('colin7672@proton.me',),
+        )
+        mocked_post.assert_not_called()
+
+    @patch('platform_api.data_factory.account_add.DatabaseClient')
+    def test_data_factory_account_add_marks_kyc_passed_via_database_update(self, mocked_database_client):
+        from platform_api.data_factory.account_add import mark_kyc_passed
+
+        mocked_db = mocked_database_client.return_value.__enter__.return_value
+        mocked_db.execute_write.return_value = 1
+
+        affected_rows = mark_kyc_passed('404211509485375488')
+
+        self.assertEqual(affected_rows, 1)
+        mocked_db.execute_write.assert_called_once()
+        sql, params = mocked_db.execute_write.call_args.args
+        self.assertIn('UPDATE member_extra', sql)
+        self.assertIn('SET kyc_status = 2, kyc_passed = 1, kyc_level = 2', sql)
+        self.assertEqual(params, ('404211509485375488',))
+
+    @patch('platform_api.data_factory.account_add.time.sleep', return_value=None)
+    @patch('platform_api.data_factory.account_add.mark_kyc_passed', return_value=1)
+    @patch('platform_api.data_factory.account_add.query_kyc_info_from_db', return_value=(
+        '404211509485375488', 'uuid-1', None, None,
+    ))
+    @patch('platform_api.data_factory.account_add.get_kyc_url')
+    @patch('platform_api.data_factory.account_add.extract_token_str', return_value='test-token')
+    @patch('platform_api.data_factory.account_add.get_brazil_id', return_value='123.456.789-09')
+    @patch('platform_api.data_factory.account_add.check_member_exists', return_value=None)
+    @patch('platform_api.data_factory.account_add.requests.post')
+    def test_data_factory_account_add_uses_database_update_after_registration(
+        self,
+        mocked_post,
+        mocked_check_member_exists,
+        mocked_get_brazil_id,
+        mocked_extract_token_str,
+        mocked_get_kyc_url,
+        mocked_query_kyc_info_from_db,
+        mocked_mark_kyc_passed,
+        mocked_sleep,
+    ):
+        from platform_api.data_factory.account_add import _run_single_account
+
+        response = Mock()
+        response.status_code = 200
+        response.text = '{"code": 0}'
+        response.headers = {}
+        response.json.return_value = {'code': 0}
+        mocked_post.return_value = response
+
+        frontend_environment = SimpleNamespace(
+            name='账户添加前台数据库更新',
+            base_url='https://api-test.helix.city',
+        )
+        backend_environment = SimpleNamespace(
+            name='账户添加后台数据库更新',
+            base_url='https://mgt-api-test.helix.city',
+            login_url='https://mgt-api-test.helix.city/api/v2/login',
+            id=99,
+        )
+        operator = SimpleNamespace(username='admin')
+
+        result = _run_single_account(
+            frontend_environment,
+            backend_environment,
+            username='admin',
+            password='target-login-pass',
+            email='colin7672@proton.me',
+            amount=Decimal('0'),
+            operator=operator,
+        )
+
+        mocked_mark_kyc_passed.assert_called_once_with('404211509485375488')
+        mocked_get_kyc_url.assert_called_once_with(frontend_environment, 'test-token')
+        self.assertEqual(result['member_id'], '404211509485375488')
+        self.assertEqual(result['status'], 'registered')
+
+class OrderResultRollbackTests(SimpleTestCase):
+    def mocked_success_outcome(self):
+        return type('Outcome', (), {
+            'status': 'passed',
+            'message': 'HTTP 200 · 断言通过',
+            'response_log': '{"ok":true}',
+        })()
+
+    @patch('platform_api.data_factory.order_result_push.api_request_executor.execute')
+    def test_rollback_bet_settlement_posts_content_payload(self, mocked_execute):
+        from platform_api.data_factory.order_result_push import ROLLBACK_BET_SETTLEMENT_URL, rollback_bet_settlement
+
+        mocked_execute.return_value = self.mocked_success_outcome()
+
+        result = rollback_bet_settlement(
+            product='3',
+            event_id='sr:match:66886848',
+            market_id='18',
+            specifiers='total=1.5',
+            timestamp=1784601930281,
+        )
+
+        mocked_execute.assert_called_once()
+        self.assertEqual(mocked_execute.call_args.kwargs['url'], ROLLBACK_BET_SETTLEMENT_URL)
+        self.assertEqual(mocked_execute.call_args.kwargs['method'], 'POST')
+        payload = mocked_execute.call_args.kwargs['request_params']
+        self.assertEqual(payload['partition'], 0)
+        self.assertEqual(payload['key'], 'sr:match:66886848')
+        self.assertEqual(payload['keySerde'], 'String')
+        self.assertEqual(payload['valueSerde'], 'String')
+        self.assertNotIn('value', payload)
+        self.assertIn('<rollback_bet_settlement product="3" event_id="sr:match:66886848" timestamp="1784601930281">', payload['content'])
+        self.assertIn('<market id="18" specifiers="total=1.5"/>', payload['content'])
+        self.assertEqual(result['event_id'], 'sr:match:66886848')
+        self.assertEqual(result['payload'], payload)
+
+
+class OrderResultCancelTests(SimpleTestCase):
+    def mocked_success_outcome(self):
+        return type('Outcome', (), {
+            'status': 'passed',
+            'message': 'HTTP 200 · 断言通过',
+            'response_log': '{"ok":true}',
+        })()
+
+    @patch('platform_api.data_factory.order_result_push.api_request_executor.execute')
+    def test_bet_cancel_posts_content_payload(self, mocked_execute):
+        from platform_api.data_factory.order_result_push import BET_CANCEL_URL, bet_cancel
+
+        mocked_execute.return_value = self.mocked_success_outcome()
+
+        result = bet_cancel(
+            product='3',
+            event_id='sr:match:66886868',
+            market_id='1',
+            specifiers='',
+            start_time='',
+            end_time='',
+            timestamp=1784601930281,
+        )
+
+        mocked_execute.assert_called_once()
+        self.assertEqual(mocked_execute.call_args.kwargs['url'], BET_CANCEL_URL)
+        self.assertEqual(mocked_execute.call_args.kwargs['method'], 'POST')
+        payload = mocked_execute.call_args.kwargs['request_params']
+        self.assertEqual(payload['partition'], 0)
+        self.assertEqual(payload['key'], 'sr:match:66886868')
+        self.assertEqual(payload['keySerde'], 'String')
+        self.assertEqual(payload['valueSerde'], 'String')
+        self.assertNotIn('value', payload)
+        self.assertIn(
+            '<bet_cancel start_time="" end_time="" product="3" event_id="sr:match:66886868" timestamp="1784601930281">',
+            payload['content'],
+        )
+        self.assertIn('<market void_reason="4" id="1" specifiers=""/>', payload['content'])
+        self.assertEqual(result['event_id'], 'sr:match:66886868')
+        self.assertEqual(result['payload'], payload)
+
+    @patch('platform_api.data_factory.order_result_push.api_request_executor.execute')
+    def test_rollback_bet_cancel_posts_content_payload(self, mocked_execute):
+        from platform_api.data_factory.order_result_push import ROLLBACK_BET_CANCEL_URL, rollback_bet_cancel
+
+        mocked_execute.return_value = self.mocked_success_outcome()
+
+        result = rollback_bet_cancel(
+            product='3',
+            event_id='sr:match:66886868',
+            market_id='1',
+            specifiers='',
+            start_time='',
+            end_time='',
+            timestamp=1784602930291,
+        )
+
+        mocked_execute.assert_called_once()
+        self.assertEqual(mocked_execute.call_args.kwargs['url'], ROLLBACK_BET_CANCEL_URL)
+        self.assertEqual(mocked_execute.call_args.kwargs['method'], 'POST')
+        payload = mocked_execute.call_args.kwargs['request_params']
+        self.assertEqual(payload['partition'], 0)
+        self.assertEqual(payload['key'], 'sr:match:66886868')
+        self.assertEqual(payload['keySerde'], 'String')
+        self.assertEqual(payload['valueSerde'], 'String')
+        self.assertNotIn('value', payload)
+        self.assertIn(
+            '<rollback_bet_cancel start_time="" end_time="" product="3" event_id="sr:match:66886868" timestamp="1784602930291">',
+            payload['content'],
+        )
+        self.assertIn('<market id="1" specifiers=""/>', payload['content'])
+        self.assertEqual(result['event_id'], 'sr:match:66886868')
+        self.assertEqual(result['payload'], payload)
+
+
 class PlatformApiTests(APITestCase):
     def setUp(self):
         self.admin_role = Role.objects.create(
@@ -48,6 +400,11 @@ class PlatformApiTests(APITestCase):
         )
         self.client.force_authenticate(self.admin)
 
+    def set_environment_account(self, environment, account='target-system-account'):
+        return UserEnvironmentAccount.objects.update_or_create(
+            user=self.admin, environment=environment, defaults={'account': account},
+        )
+
     def test_login_returns_tokens_and_user(self):
         self.client.force_authenticate(None)
         response = self.client.post('/api/auth/login/', {
@@ -56,6 +413,42 @@ class PlatformApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn('access', response.data['data'])
         self.assertEqual(response.data['data']['user']['role'], 'admin')
+
+    @override_settings(LARK_APP_ID='cli_test', LARK_APP_SECRET='secret', LARK_FRONTEND_URL='http://frontend.test', LARK_DEFAULT_ROLE_CODE='tester')
+    def test_lark_callback_provisions_user_and_returns_platform_tokens(self):
+        self.client.force_authenticate(None)
+        session = self.client.session
+        session['lark_oauth_state'] = 'valid-state'
+        session.save()
+        with patch('platform_api.views.lark_request', side_effect=[
+            {'app_access_token': 'app-access-token'},
+            {'access_token': 'lark-access-token'},
+            {'union_id': 'union-new-user', 'open_id': 'open-new-user', 'name': 'Lark Tester', 'email': 'lark@example.com'},
+        ]):
+            response = self.client.get('/api/auth/lark/callback/?code=auth-code&state=valid-state')
+        self.assertEqual(response.status_code, status.HTTP_302_FOUND)
+        self.assertTrue(response['Location'].startswith('http://frontend.test/login#access='))
+        user = User.objects.get(lark_union_id='union-new-user')
+        self.assertEqual(user.role, self.tester_role)
+        self.assertEqual(user.created_via, 'lark_sso')
+
+        # The same browser session should bypass the Lark authorization page next time.
+        response = self.client.get('/api/auth/lark/login/')
+        self.assertEqual(response.status_code, status.HTTP_302_FOUND)
+        self.assertTrue(response['Location'].startswith('http://frontend.test/login#access='))
+
+    def test_lark_provision_binds_existing_manual_user_by_email(self):
+        from .views import provision_lark_user
+        manual = User.objects.create_user(username='manual-user', password='password123', name='原姓名', email='manual@example.com', role=self.tester_role)
+        user = provision_lark_user({'union_id': 'union-manual-user', 'open_id': 'open-manual-user', 'name': 'Lark 姓名', 'email': 'manual@example.com'})
+        self.assertEqual(user.id, manual.id)
+        self.assertEqual(user.lark_union_id, 'union-manual-user')
+        self.assertEqual(user.name, 'Lark 姓名')
+
+    def test_lark_callback_rejects_invalid_state(self):
+        self.client.force_authenticate(None)
+        response = self.client.get('/api/auth/lark/callback/?code=auth-code&state=invalid-state')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_dashboard_returns_database_statistics(self):
         ApiInterface.objects.create(
@@ -68,6 +461,15 @@ class PlatformApiTests(APITestCase):
         self.assertEqual(response.data['data']['interfaces']['by_module'][0]['module_name'], '活动')
         self.assertEqual(response.data['data']['execution']['task_total'], 0)
         self.assertEqual(len(response.data['data']['trend']), 7)
+
+    def test_dashboard_requires_home_view_permission(self):
+        user = User.objects.create_user(
+            username='no-home-user', password='SafePass@123', name='无首页权限用户',
+            role=self.tester_role,
+        )
+        self.client.force_authenticate(user)
+        response = self.client.get('/api/dashboard/')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     @patch('platform_api.executor.perf_counter', side_effect=[0, 3.1])
     @patch('platform_api.executor.urlopen', return_value=FakeHttpResponse())
@@ -101,18 +503,23 @@ class PlatformApiTests(APITestCase):
         )
 
     def test_parameterized_request_values_are_generated_and_replaced(self):
-        variables = build_parameter_variables([
-            {'name': 'personName', 'type': 'name'},
-            {'name': 'mobile', 'type': 'phone'},
-            {'name': 'email', 'type': 'custom', 'value': 'fixed@example.com'},
-        ])
+        with patch('platform_api.services.timezone.now', return_value=datetime(2026, 8, 4, 10, 30, tzinfo=timezone.get_current_timezone())):
+            variables = build_parameter_variables([
+                {'name': 'personName', 'type': 'name'},
+                {'name': 'mobile', 'type': 'phone'},
+                {'name': 'email', 'type': 'custom', 'value': 'fixed@example.com'},
+                {'name': 'bizDate', 'type': 'time', 'time_format': 'date', 'time_offset': 3},
+                {'name': 'bizMonth', 'type': 'time', 'time_format': 'year_month', 'time_offset': -35},
+            ])
         rendered = replace_parameter_variables(
-            {'body': {'name': '{{personName}}', 'phone': '{{mobile}}', 'note': 'mail={{email}}'}},
+            {'body': {'name': '{{personName}}', 'phone': '{{mobile}}', 'note': 'mail={{email}}', 'date': '{{bizDate}}', 'month': '{{bizMonth}}'}},
             variables,
         )
         self.assertEqual(rendered['body']['name'], variables['personName'])
         self.assertRegex(rendered['body']['phone'], r'^1[3-9]\d{9}$')
         self.assertEqual(rendered['body']['note'], 'mail=fixed@example.com')
+        self.assertEqual(rendered['body']['date'], '2026-08-07')
+        self.assertEqual(rendered['body']['month'], '2026-06')
         legacy = replace_parameter_variables({'phone': '${mobile}'}, variables)
         self.assertRegex(legacy['phone'], r'^1[3-9]\d{9}$')
 
@@ -170,6 +577,22 @@ class PlatformApiTests(APITestCase):
         with self.assertRaisesMessage(ValueError, '关联接口返回列表为空'):
             build_full_parameter_scenarios(interface, response_variables={'bit': []})
 
+    def test_get_brazil_id_returns_valid_cpf_format(self):
+        from platform_api.data_factory.account_add import get_brazil_id
+
+        def check_digit(values, start_weight):
+            total = sum(value * weight for value, weight in zip(values, range(start_weight, 1, -1)))
+            remainder = (total * 10) % 11
+            return 0 if remainder == 10 else remainder
+
+        cpf = get_brazil_id()
+        self.assertRegex(cpf, r'^\d{3}\.\d{3}\.\d{3}-\d{2}$')
+        digits = [int(ch) for ch in cpf if ch.isdigit()]
+        self.assertEqual(len(digits), 11)
+        self.assertNotEqual(len(set(digits[:9])), 1)
+        self.assertEqual(digits[9], check_digit(digits[:9], 10))
+        self.assertEqual(digits[10], check_digit(digits[:10], 11))
+
     @patch('platform_api.executor.urlopen', return_value=FakeHttpResponse())
     def test_frontend_request_uses_raw_authorization_token(self, mocked_urlopen):
         api_request_executor.execute(
@@ -186,6 +609,7 @@ class PlatformApiTests(APITestCase):
         }, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         user_id = response.data['data']['id']
+        self.assertNotIn('platform_account', response.data['data'])
 
         response = self.client.get('/api/users/?keyword=测试一号&role=tester')
         self.assertEqual(response.data['data']['total'], 1)
@@ -207,6 +631,56 @@ class PlatformApiTests(APITestCase):
         }, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_current_user_environment_accounts_are_isolated_and_can_be_saved(self):
+        default_environment = Environment.objects.create(
+            name='默认账号环境', base_url='https://default.example.com', is_default=True,
+        )
+        secondary_environment = Environment.objects.create(
+            name='备用账号环境', base_url='https://secondary.example.com',
+        )
+        other_user = User.objects.create_user(
+            username='other-user', password='SafePass@123', name='其他用户', role=self.tester_role,
+        )
+        UserEnvironmentAccount.objects.create(
+            user=other_user, environment=default_environment, account='other-account',
+        )
+
+        response = self.client.get('/api/me/environment-accounts/')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['data'], {
+            'accounts': [],
+            'environments': [
+                {'id': default_environment.id, 'name': '默认账号环境'},
+                {'id': secondary_environment.id, 'name': '备用账号环境'},
+            ],
+        })
+
+        response = self.client.put('/api/me/environment-accounts/', {
+            'accounts': [
+                {'environment_id': default_environment.id, 'account': 'default-account'},
+                {'environment_id': secondary_environment.id, 'account': 'secondary-account'},
+            ],
+        }, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            UserEnvironmentAccount.objects.get(user=self.admin, environment=default_environment).account,
+            'default-account',
+        )
+        self.assertEqual(
+            UserEnvironmentAccount.objects.get(user=self.admin, environment=secondary_environment).account,
+            'secondary-account',
+        )
+        self.assertEqual(
+            UserEnvironmentAccount.objects.get(user=other_user, environment=default_environment).account,
+            'other-account',
+        )
+        self.assertEqual(response.data['data']['accounts'], [
+            {'environment_id': default_environment.id, 'environment_name': '默认账号环境', 'account': 'default-account'},
+            {'environment_id': secondary_environment.id, 'environment_name': '备用账号环境', 'account': 'secondary-account'},
+        ])
+
     def test_user_can_be_created_without_email(self):
         response = self.client.post('/api/users/', {
             'username': 'tester_without_email', 'name': '无邮箱用户',
@@ -214,6 +688,49 @@ class PlatformApiTests(APITestCase):
         }, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data['data']['email'], '')
+
+    def test_user_status_requires_and_uses_dedicated_permission(self):
+        status_role = Role.objects.create(name='状态管理员', code='status_manager', permissions=['users.status'])
+        operator = User.objects.create_user(username='status-operator', password='SafePass@123', name='状态管理员', role=status_role)
+        target = User.objects.create_user(username='status-target', password='SafePass@123', name='待停用用户', role=self.tester_role)
+        self.client.force_authenticate(operator)
+        response = self.client.post(f'/api/users/{target.id}/toggle-status/', {'is_active': False}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data['data']['is_active'])
+
+    def test_data_factory_order_operations_require_separate_permissions(self):
+        role = Role.objects.create(name='订单操作员', code='order_operator', permissions=[])
+        operator = User.objects.create_user(username='order-operator', password='SafePass@123', name='订单操作员', role=role)
+        self.client.force_authenticate(operator)
+        operations = [
+            ('data_factory.order_result_push', '/api/data-factory/order-result-push/'),
+            ('data_factory.rollback_settlement', '/api/data-factory/rollback-settlement/'),
+            ('data_factory.bet_cancel', '/api/data-factory/bet-cancel/'),
+            ('data_factory.rollback_bet_cancel', '/api/data-factory/rollback-bet-cancel/'),
+        ]
+        for permission, path in operations:
+            with self.subTest(permission=permission):
+                role.permissions = [permission]
+                role.save(update_fields=['permissions'])
+                allowed_response = self.client.post(path, {}, format='json')
+                self.assertEqual(allowed_response.status_code, status.HTTP_400_BAD_REQUEST)
+                role.permissions = []
+                role.save(update_fields=['permissions'])
+                denied_response = self.client.post(path, {}, format='json')
+                self.assertEqual(denied_response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_data_factory_environment_list_uses_tool_permission_and_hides_variables(self):
+        Environment.objects.create(
+            name='工具环境', base_url='https://tool.example.com', login_url='https://tool.example.com/login',
+            variables=[{'key': 'SECRET_TOKEN', 'value': 'secret-value'}],
+        )
+        role = Role.objects.create(name='数据工具员', code='data_tool_operator', permissions=['data_factory.account_add'])
+        operator = User.objects.create_user(username='data-tool-operator', password='SafePass@123', name='数据工具员', role=role)
+        self.client.force_authenticate(operator)
+        response = self.client.get('/api/data-factory/environments/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['data'][0]['variables'], [])
+        self.assertNotIn('secret-value', str(response.data))
 
     def test_current_admin_cannot_be_deleted_or_demoted(self):
         response = self.client.delete(f'/api/users/{self.admin.id}/')
@@ -229,9 +746,9 @@ class PlatformApiTests(APITestCase):
         role_id = response.data['data']['id']
 
         response = self.client.post(f'/api/roles/{role_id}/permissions/', {
-            'permissions': ['home.view', 'automation.view', 'home.view']
+            'permissions': ['home.view', 'automation.view', 'data_factory.account_add', 'home.view']
         }, format='json')
-        self.assertEqual(response.data['data']['permissions'], ['home.view', 'automation.view'])
+        self.assertEqual(response.data['data']['permissions'], ['home.view', 'automation.view', 'data_factory.account_add'])
 
         user = User.objects.create_user(
             username='observer', password='SafePass@123', name='观察员',
@@ -469,6 +986,7 @@ fetch("https://api-test.helix.city/api/v1/member/getUnreadCount?scope=all", {
             headers={'Content-Type': 'application/json; charset=utf-8'}, request_params={'username': 'demo'},
             assertions={'status_code': 200, 'body_contains': 'ok'}, created_by=self.admin,
         )
+        self.set_environment_account(environment, 'frontend-account')
         response = self.client.post('/api/automation/tasks/', {
             'name': '登录回归', 'module': module.id, 'task_type': 'ui',
             'environment': environment.id, 'owner': self.admin.id,
@@ -490,9 +1008,9 @@ fetch("https://api-test.helix.city/api/v1/member/getUnreadCount?scope=all", {
         self.assertEqual(mocked_urlopen.call_count, 2)
         self.assertEqual(
             json.loads(mocked_urlopen.call_args_list[0].args[0].data.decode('utf-8')),
-            {'identifier': 'admin@example.com', 'secret': target_password},
+            {'identifier': 'frontend-account', 'secret': target_password},
         )
-        self.assertEqual(response.data['data']['execution_details'][0]['request_params'], {'identifier': 'admin@example.com'})
+        self.assertEqual(response.data['data']['execution_details'][0]['request_params'], {'identifier': 'frontend-account'})
         self.assertEqual(mocked_urlopen.call_args.kwargs['timeout'], 3)
         self.assertEqual(AutomationTask.objects.count(), 1)
         detail = AutomationTaskResult.objects.get(task_id=task_id, source_interface_id=interface.id)
@@ -577,6 +1095,7 @@ fetch("https://api-test.helix.city/api/v1/member/getUnreadCount?scope=all", {
         )
         task.modules.add(module)
         task.interfaces.add(interface)
+        self.set_environment_account(environment)
 
         generated_names = ['场景用户1', '场景用户2', '场景用户3', '场景用户4']
         with patch('platform_api.services.generate_parameter_value', side_effect=generated_names) as mocked_generate:
@@ -610,24 +1129,23 @@ fetch("https://api-test.helix.city/api/v1/member/getUnreadCount?scope=all", {
         self.assertEqual(retry_response.data['data']['request_params'], expected_params[2])
         self.assertEqual(mocked_urlopen.call_count, 2)
 
+    @override_settings(DATA_FACTORY_BACKEND_ACCOUNT='factory-account', DATA_FACTORY_BACKEND_PASSWORD='factory-password')
     @patch('platform_api.views.execute_account_balance', return_value={
         'member_id': 'member-1', 'adjustment_id': 'adjustment-1',
     })
-    def test_data_factory_uses_target_system_password(self, mocked_execute):
+    def test_data_factory_uses_configured_platform_credentials(self, mocked_execute):
         environment = Environment.objects.create(
             name='后台工具环境', base_url='https://admin.example.com',
             login_url='https://admin.example.com/auth/login',
         )
-        target_password = 'target-login-pass'
         response = self.client.post('/api/data-factory/account-balance/', {
             'environment': environment.id,
             'email': 'member@example.com',
             'amount': 10,
-            'login_password': target_password,
         }, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         mocked_execute.assert_called_once_with(
-            self.admin, target_password, environment.id, 'member@example.com', Decimal('10'),
+            environment.id, 'member@example.com', Decimal('10'),
         )
 
     @patch('platform_api.views.execute_account_balance', side_effect=ValueError('boom'))
@@ -640,11 +1158,98 @@ fetch("https://api-test.helix.city/api/v1/member/getUnreadCount?scope=all", {
             'environment': environment.id,
             'email': 'member@example.com',
             'amount': 10,
-            'login_password': 'target-login-pass',
         }, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('boom', str(response.data))
         mocked_execute.assert_called_once()
+
+    @patch('platform_api.views.bet_cancel', return_value={
+        'event_id': 'sr:match:66886868',
+        'key': 'sr:match:66886868',
+        'timestamp': 1784601930281,
+        'status_code': 200,
+        'message': 'HTTP 200 · 断言通过',
+        'response': '{"ok":true}',
+        'payload': {
+            'partition': 0,
+            'key': 'sr:match:66886868',
+            'content': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n<bet_cancel start_time="" end_time="" product="3" event_id="sr:match:66886868" timestamp="1784601930281"><market void_reason="4" id="1" specifiers="goalnr=2"/>\r\n</bet_cancel>',
+            'keySerde': 'String',
+            'valueSerde': 'String',
+        },
+    })
+    def test_data_factory_bet_cancel_uses_optional_fields(self, mocked_execute):
+        environment = Environment.objects.create(
+            name='取消测试环境', base_url='https://admin.example.com',
+            login_url='https://admin.example.com/auth/login',
+        )
+        response = self.client.post('/api/data-factory/bet-cancel/', {
+            'product': 3,
+            'event_id': 'sr:match:66886868',
+            'market_id': 1,
+            'specifiers': 'goalnr=2',
+            'start_time': '',
+            'end_time': '',
+            'timestamp': 1784601930281,
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mocked_execute.assert_called_once_with(
+            product='3',
+            event_id='sr:match:66886868',
+            market_id='1',
+            specifiers='goalnr=2',
+            start_time='',
+            end_time='',
+            timestamp=1784601930281,
+        )
+        execution = DataFactoryExecution.objects.get(tool_name='取消', email='sr:match:66886868')
+        self.assertEqual(execution.status, 'passed')
+        self.assertIn('product=3', execution.message)
+        self.assertIn('specifiers=goalnr=2', execution.message)
+
+    @patch('platform_api.views.rollback_bet_cancel', return_value={
+        'event_id': 'sr:match:66886868',
+        'key': 'sr:match:66886868',
+        'timestamp': 1784602930291,
+        'status_code': 200,
+        'message': 'HTTP 200 · 断言通过',
+        'response': '{"ok":true}',
+        'payload': {
+            'partition': 0,
+            'key': 'sr:match:66886868',
+            'content': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n<rollback_bet_cancel start_time="" end_time="" product="3" event_id="sr:match:66886868" timestamp="1784602930291"><market id="1" specifiers="goalnr=2"/>\r\n</rollback_bet_cancel>',
+            'keySerde': 'String',
+            'valueSerde': 'String',
+        },
+    })
+    def test_data_factory_rollback_bet_cancel_uses_optional_fields(self, mocked_execute):
+        Environment.objects.create(
+            name='回滚取消测试环境', base_url='https://admin.example.com',
+            login_url='https://admin.example.com/auth/login',
+        )
+        response = self.client.post('/api/data-factory/rollback-bet-cancel/', {
+            'product': 3,
+            'event_id': 'sr:match:66886868',
+            'market_id': 1,
+            'specifiers': 'goalnr=2',
+            'start_time': '',
+            'end_time': '',
+            'timestamp': 1784602930291,
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mocked_execute.assert_called_once_with(
+            product='3',
+            event_id='sr:match:66886868',
+            market_id='1',
+            specifiers='goalnr=2',
+            start_time='',
+            end_time='',
+            timestamp=1784602930291,
+        )
+        execution = DataFactoryExecution.objects.get(tool_name='回滚取消', email='sr:match:66886868')
+        self.assertEqual(execution.status, 'passed')
+        self.assertIn('product=3', execution.message)
+        self.assertIn('specifiers=goalnr=2', execution.message)
 
     @patch('platform_api.data_factory.account_balance.execute_platform_login')
     def test_data_factory_account_balance_uses_login_encoding_keyword(self, mocked_login):
@@ -655,8 +1260,11 @@ fetch("https://api-test.helix.city/api/v1/member/getUnreadCount?scope=all", {
         mocked_login.return_value = type('LoginResult', (), {'access_token': '', 'message': ''})()
         from platform_api.data_factory.account_balance import DataFactoryError, execute_account_balance
         with self.assertRaises(DataFactoryError):
-            execute_account_balance(self.admin, 'target-login-pass', environment.id, 'member@example.com', Decimal('10'))
+            with override_settings(DATA_FACTORY_BACKEND_ACCOUNT='factory-account', DATA_FACTORY_BACKEND_PASSWORD='factory-password'):
+                execute_account_balance(environment.id, 'member@example.com', Decimal('10'))
         mocked_login.assert_called_once()
+        self.assertEqual(mocked_login.call_args.kwargs['account'], 'factory-account')
+        self.assertEqual(mocked_login.call_args.kwargs['password'], 'factory-password')
         self.assertEqual(mocked_login.call_args.kwargs.get('login_encoding'), 'multipart')
         self.assertNotIn('request_encoding', mocked_login.call_args.kwargs)
 
@@ -682,20 +1290,18 @@ fetch("https://api-test.helix.city/api/v1/member/getUnreadCount?scope=all", {
             login_url='https://mgt-api-test.helix.city/api/v2/login',
             variables=[{'key': 'userName', 'value': '用户名'}, {'key': 'password', 'value': '密码'}],
         )
-        target_password = 'target-login-pass'
         response = self.client.post('/api/data-factory/account-add/', {
             'frontend_environment': frontend_environment.id,
             'backend_environment': backend_environment.id,
             'email': '',
             'amount': 10,
             'quantity': 3,
-            'login_password': target_password,
         }, format='json')
         self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
         self.assertEqual(response.data['data']['status'], 'running')
         mocked_on_commit.assert_called_once()
         mocked_execute.assert_called_once_with(
-            self.admin, target_password, frontend_environment.id, backend_environment.id, '', Decimal('10'), 3,
+            frontend_environment.id, backend_environment.id, '', Decimal('10'), 3,
         )
         execution = DataFactoryExecution.objects.get(pk=response.data['data']['execution_id'])
         self.assertEqual(execution.status, 'passed')
@@ -719,6 +1325,7 @@ fetch("https://api-test.helix.city/api/v1/member/getUnreadCount?scope=all", {
             name='登录失败提示', task_type='api', environment=environment, owner=self.admin,
         )
         task.modules.add(module)
+        self.set_environment_account(environment)
 
         response = self.client.post(
             f'/api/automation/tasks/{task.id}/run/',
@@ -744,19 +1351,37 @@ fetch("https://api-test.helix.city/api/v1/member/getUnreadCount?scope=all", {
             name='后台登录回归', task_type='api', environment=environment, owner=self.admin,
         )
         task.modules.add(module)
+        self.set_environment_account(environment, 'target-backend-account')
 
         execute_task(task, self.admin, 'Aibet@123456')
 
         login_request = mocked_urlopen.call_args_list[0].args[0]
         login_body = login_request.data.decode('utf-8')
         self.assertIn('multipart/form-data; boundary=', login_request.get_header('Content-type'))
-        self.assertIn('name="userName"\r\n\r\nadmin', login_body)
+        self.assertIn('name="userName"\r\n\r\ntarget-backend-account', login_body)
         self.assertIn('name="password"\r\n\r\nAibet@123456', login_body)
         login_result = AutomationTaskResult.objects.get(task=task, interface_name='系统登录')
-        self.assertEqual(login_result.request_params, {'userName': 'admin'})
+        self.assertEqual(login_result.request_params, {'userName': 'target-backend-account'})
         api_request = mocked_urlopen.call_args_list[1].args[0]
         self.assertEqual(api_request.get_header('X-token'), 'test-token')
         self.assertIsNone(api_request.get_header('Authorization'))
+
+    def test_task_requires_environment_account(self):
+        module, _ = AutomationModule.objects.get_or_create(app='backend', name='后台', defaults={'sort_order': 1})
+        environment = Environment.objects.create(
+            name='缺少平台账号后台环境', base_url='https://admin.example.com',
+            login_url='https://admin.example.com/auth/login',
+        )
+        task = AutomationTask.objects.create(
+            name='后台账号校验', task_type='api', environment=environment, owner=self.admin,
+        )
+        task.modules.add(module)
+
+        results = execute_task(task, self.admin, 'Aibet@123456')
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].status, 'failed')
+        self.assertIn('当前用户未配置环境“缺少平台账号后台环境”的目标系统账号', results[0].response_message)
 
     @patch('platform_api.executor.urlopen', side_effect=[
         JsonFakeHttpResponse({'data': {'access': 'test-token'}}),
@@ -783,6 +1408,7 @@ fetch("https://api-test.helix.city/api/v1/member/getUnreadCount?scope=all", {
             name='关联响应变量回归', task_type='api', environment=environment, owner=self.admin,
         )
         task.modules.add(module)
+        self.set_environment_account(environment)
 
         execute_task(task, self.admin, 'Aibet@123456')
 
@@ -831,6 +1457,7 @@ fetch("https://api-test.helix.city/api/v1/member/getUnreadCount?scope=all", {
             name='全参数关联变量回归', task_type='api', environment=environment, owner=self.admin,
         )
         task.modules.add(module)
+        self.set_environment_account(environment)
 
         execute_task(task, self.admin, 'Aibet@123456')
 
@@ -875,6 +1502,7 @@ fetch("https://api-test.helix.city/api/v1/member/getUnreadCount?scope=all", {
         )
         task.modules.add(module)
         task.interfaces.add(target)
+        self.set_environment_account(environment)
 
         execute_task(task, self.admin, 'Aibet@123456')
 
@@ -913,6 +1541,7 @@ fetch("https://api-test.helix.city/api/v1/member/getUnreadCount?scope=all", {
         )
         task.modules.add(module)
         task.interfaces.add(target)
+        self.set_environment_account(environment)
 
         execute_task(task, self.admin, 'Aibet@123456')
 
@@ -962,6 +1591,7 @@ fetch("https://api-test.helix.city/api/v1/member/getUnreadCount?scope=all", {
         )
         task.modules.add(module)
         task.interfaces.add(target)
+        self.set_environment_account(environment)
 
         execute_task(task, self.admin, 'Aibet@123456')
 

@@ -1,28 +1,37 @@
 import secrets
 import string
 import threading
+import json
 from decimal import Decimal
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
+from django.conf import settings
+from django.contrib.auth import login as django_login
 from django.db import close_old_connections, transaction
 from django.db.models import Avg, Count, Q
 from django.db.models.functions import TruncDate
+from django.http import HttpResponseBadRequest, HttpResponseRedirect
 from django.utils import timezone
 from rest_framework import status, viewsets
+from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.views import APIView
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.views import TokenObtainPairView
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from .constants import BUSINESS_MODULE_NAMES
-from .data_factory import DataFactoryError, execute_account_add, execute_account_balance, push_order_result
+from .data_factory import DataFactoryError, bet_cancel, execute_account_add, execute_account_balance, push_order_result, rollback_bet_cancel, rollback_bet_settlement
 from .interface_import import InterfaceImportError, parse_fetch_text
-from .models import ApiInterface, AutomationModule, AutomationTask, AutomationTaskResult, DataFactoryExecution, Environment, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorTask, Role, User
+from .models import ApiInterface, AutomationModule, AutomationTask, AutomationTaskResult, DataFactoryExecution, Environment, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorTask, Role, User, UserEnvironmentAccount
 from .pagination import StandardPagination
 from .permissions import ActionPermissionMixin
 from .responses import success
-from .serializers import ApiInterfaceSerializer, AutomationModuleSerializer, AutomationTaskResultSerializer, AutomationTaskSerializer, DataFactoryExecutionSerializer, EnvironmentSerializer, MonitorAlarmSerializer, MonitorApiConfigSerializer, MonitorExecutionDetailSerializer, MonitorExecutionSerializer, MonitorTaskSerializer, PermissionSerializer, ResetPasswordSerializer, RoleSerializer, UserCreateSerializer, UserSerializer
+from .serializers import ApiInterfaceSerializer, AutomationModuleSerializer, AutomationTaskResultSerializer, AutomationTaskSerializer, DataFactoryExecutionSerializer, EnvironmentSerializer, MonitorAlarmSerializer, MonitorApiConfigSerializer, MonitorExecutionDetailSerializer, MonitorExecutionSerializer, MonitorTaskSerializer, PermissionSerializer, ResetPasswordSerializer, RoleSerializer, UserCreateSerializer, UserEnvironmentAccountUpdateSerializer, UserSerializer
 from .services import execute_monitor_task, execute_task, retry_monitor_detail, retry_task_result, sync_monitor_next_run_time
 
 
@@ -30,6 +39,9 @@ class DashboardView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        permissions = request.user.role.permissions if isinstance(request.user.role.permissions, list) else []
+        if not (request.user.is_superuser or request.user.role.code == 'admin' or 'home.view' in permissions):
+            raise PermissionDenied('当前账号没有查看首页的权限')
         interface_by_method = list(ApiInterface.objects.values('method').annotate(count=Count('id')).order_by('method'))
         interface_by_module = list(ApiInterface.objects.values('module_name').annotate(count=Count('id')).order_by('-count', 'module_name'))
         task_status = {item['status']: item['count'] for item in AutomationTask.objects.values('status').annotate(count=Count('id'))}
@@ -110,6 +122,138 @@ class LoginView(TokenObtainPairView):
         return success(serializer.validated_data, '登录成功')
 
 
+def lark_request(path, *, payload=None, access_token=''):
+    headers = {'Content-Type': 'application/json'}
+    if access_token:
+        headers['Authorization'] = f'Bearer {access_token}'
+    request = Request(
+        f'{settings.LARK_OPEN_BASE_URL}{path}',
+        data=json.dumps(payload).encode('utf-8') if payload is not None else None,
+        headers=headers,
+        method='POST' if payload is not None else 'GET',
+    )
+    try:
+        with urlopen(request, timeout=10) as response:
+            data = json.loads(response.read().decode('utf-8'))
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise ValidationError('Lark 身份验证服务暂时不可用') from exc
+    if data.get('code', 0) != 0:
+        raise ValidationError(data.get('msg') or 'Lark 身份验证失败')
+    # Lark identity APIs return their payload under data, while the app-token
+    # endpoint returns app_access_token at the top level.
+    return data.get('data') or data
+
+
+def lark_redirect_uri(request):
+    return settings.LARK_REDIRECT_URI or request.build_absolute_uri('/api/auth/lark/callback/')
+
+
+def lark_token(data, key, label):
+    token = str(data.get(key, '')).strip()
+    if not token:
+        raise ValidationError(f'Lark 未返回有效的{label}')
+    return token
+
+
+def lark_username(union_id):
+    base = f'lark_{union_id[:16]}'
+    username = base
+    suffix = 2
+    while User.objects.filter(username=username).exists():
+        username = f'{base}_{suffix}'
+        suffix += 1
+    return username
+
+
+def provision_lark_user(user_info):
+    union_id = str(user_info.get('union_id', '')).strip()
+    if not union_id:
+        raise ValidationError('Lark 未返回 union_id，无法确认平台身份')
+    open_id = str(user_info.get('open_id', '')).strip()
+    name = str(user_info.get('name', '')).strip() or 'Lark 用户'
+    email = str(user_info.get('email', '')).strip().lower()
+    with transaction.atomic():
+        user = User.objects.select_for_update().filter(lark_union_id=union_id).first()
+        if user:
+            changed = []
+            for field, value in [('name', name), ('lark_open_id', open_id), ('email', email)]:
+                if value and getattr(user, field) != value:
+                    setattr(user, field, value)
+                    changed.append(field)
+            if changed:
+                user.save(update_fields=[*changed, 'updated_at'])
+            return user
+        # A previously manual account can be safely bound only when it has no Lark identity.
+        user = User.objects.select_for_update().filter(email__iexact=email, lark_union_id__isnull=True).first() if email else None
+        if user:
+            user.lark_union_id = union_id
+            user.lark_open_id = open_id
+            if name:
+                user.name = name
+            user.save(update_fields=['lark_union_id', 'lark_open_id', 'name', 'updated_at'])
+            return user
+        role = Role.objects.filter(code=settings.LARK_DEFAULT_ROLE_CODE).first()
+        if not role:
+            raise ValidationError('未配置 Lark 新用户默认角色')
+        return User.objects.create(
+            username=lark_username(union_id), name=name, email=email,
+            role=role, lark_union_id=union_id, lark_open_id=open_id,
+            created_via='lark_sso', is_active=True,
+        )
+
+
+def lark_platform_login_redirect(user):
+    refresh = RefreshToken.for_user(user)
+    params = urlencode({
+        'access': str(refresh.access_token),
+        'refresh': str(refresh),
+        'user': json.dumps(UserSerializer(user).data, ensure_ascii=False),
+    })
+    return HttpResponseRedirect(f'{settings.LARK_FRONTEND_URL}/login#{params}')
+
+
+class LarkLoginView(APIView):
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        if not settings.LARK_APP_ID or not settings.LARK_APP_SECRET:
+            return HttpResponseBadRequest('Lark AppID 或 AppSecret 未配置')
+        # A successful first Lark login leaves a server-side session in this browser.
+        # Reuse only a user whose identity has been bound to Lark.
+        if request.user.is_authenticated and request.user.is_active and request.user.lark_union_id:
+            return lark_platform_login_redirect(request.user)
+        state = secrets.token_urlsafe(32)
+        request.session['lark_oauth_state'] = state
+        params = urlencode({'app_id': settings.LARK_APP_ID, 'redirect_uri': lark_redirect_uri(request), 'state': state})
+        return HttpResponseRedirect(f'{settings.LARK_OPEN_BASE_URL}/open-apis/authen/v1/authorize?{params}')
+
+
+class LarkCallbackView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        code = str(request.query_params.get('code', '')).strip()
+        state = str(request.query_params.get('state', '')).strip()
+        expected_state = request.session.pop('lark_oauth_state', '')
+        if not code or not expected_state or not secrets.compare_digest(state, expected_state):
+            return HttpResponseBadRequest('Lark 登录请求无效或已过期')
+        try:
+            app_token = lark_token(lark_request('/open-apis/auth/v3/app_access_token/internal', payload={
+                'app_id': settings.LARK_APP_ID,
+                'app_secret': settings.LARK_APP_SECRET,
+            }), 'app_access_token', '应用访问令牌')
+            user_token = lark_token(lark_request('/open-apis/authen/v1/access_token', payload={
+                'grant_type': 'authorization_code',
+                'code': code,
+            }, access_token=app_token), 'access_token', '用户访问令牌')
+            user = provision_lark_user(lark_request('/open-apis/authen/v1/user_info', access_token=user_token))
+        except ValidationError as exc:
+            return HttpResponseBadRequest(str(exc.detail[0] if isinstance(exc.detail, list) else exc.detail))
+        django_login(request, user, backend='django.contrib.auth.backends.ModelBackend')
+        return lark_platform_login_redirect(user)
+
+
 class MeViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
 
@@ -117,14 +261,60 @@ class MeViewSet(viewsets.ViewSet):
         return success(UserSerializer(request.user).data)
 
 
+class MeEnvironmentAccountView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        accounts = [
+            {
+                'environment_id': mapping.environment_id,
+                'environment_name': mapping.environment.name,
+                'account': mapping.account,
+            }
+            for mapping in UserEnvironmentAccount.objects.filter(
+                user=request.user,
+                account__gt='',
+            ).select_related('environment').order_by(
+                '-environment__is_default', 'environment__created_at', 'environment_id',
+            )
+        ]
+        environments = [
+            {'id': environment.id, 'name': environment.name}
+            for environment in Environment.objects.all()
+        ]
+        return success({'accounts': accounts, 'environments': environments})
+
+    def put(self, request):
+        serializer = UserEnvironmentAccountUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        account_items = serializer.validated_data['accounts']
+        environment_ids = {item['environment_id'] for item in account_items}
+        existing_ids = set(Environment.objects.filter(id__in=environment_ids).values_list('id', flat=True))
+        unknown_ids = sorted(environment_ids - existing_ids)
+        if unknown_ids:
+            raise ValidationError({'accounts': f'运行环境不存在：{", ".join(map(str, unknown_ids))}'})
+        with transaction.atomic():
+            for item in account_items:
+                environment_id = item['environment_id']
+                account = item['account']
+                if account:
+                    UserEnvironmentAccount.objects.update_or_create(
+                        user=request.user,
+                        environment_id=environment_id,
+                        defaults={'account': account},
+                    )
+                else:
+                    UserEnvironmentAccount.objects.filter(
+                        user=request.user, environment_id=environment_id,
+                    ).delete()
+        return self.get(request)
+
+
 class DataFactoryAccountBalanceView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
         require_data_factory_permission(request)
-        password = str(request.data.get('login_password', ''))
-        if not password:
-            raise ValidationError({'login_password': '请输入目标系统登录密码'})
         email = str(request.data.get('email', '')).strip().lower()
         if not email or '@' not in email:
             raise ValidationError({'email': '请输入有效邮箱'})
@@ -139,7 +329,7 @@ class DataFactoryAccountBalanceView(APIView):
             raise ValidationError({'environment': '请选择有效运行环境'})
         execution = DataFactoryExecution.objects.create(tool_name='账户余额', operator=request.user, environment_id=environment_id, email=email, amount=amount)
         try:
-            result = execute_account_balance(request.user, password, environment_id, email, amount)
+            result = execute_account_balance(environment_id, email, amount)
         except DataFactoryError as exc:
             execution.status = 'failed'
             execution.message = str(exc)
@@ -184,9 +374,6 @@ class DataFactoryAccountAddView(APIView):
 
     def post(self, request):
         require_data_factory_account_add_permission(request)
-        password = str(request.data.get('login_password', ''))
-        if not password:
-            raise ValidationError({'login_password': '请输入系统密码'})
         frontend_environment_id, backend_environment_id = resolve_account_add_environment_ids(request.data)
         frontend_environment = Environment.objects.filter(pk=frontend_environment_id).first()
         if not frontend_environment:
@@ -221,15 +408,11 @@ class DataFactoryAccountAddView(APIView):
         execution_id = execution.id
         frontend_environment_id = frontend_environment.id
         backend_environment_id = backend_environment.id
-        operator = request.user
-
         def execute_created_account_add():
             close_old_connections()
             execution_record = execution
             try:
                 result = execute_account_add(
-                    operator,
-                    password,
                     frontend_environment_id,
                     backend_environment_id,
                     email,
@@ -317,6 +500,150 @@ class DataFactoryOrderResultPushView(APIView):
         return success(result, '订单结果已推送')
 
 
+def _format_cancel_message(result_message, params, timestamp):
+    extra_fields = []
+    for field in ('product', 'specifiers', 'start_time', 'end_time'):
+        value = params.get(field)
+        if value not in (None, ''):
+            extra_fields.append(f'{field}={value}')
+    if timestamp not in (None, ''):
+        extra_fields.append(f'timestamp={timestamp}')
+    return f"{result_message}；{'；'.join(extra_fields)}" if extra_fields else result_message
+
+
+def _optional_millis(value, field_name):
+    if value in (None, ''):
+        return ''
+    text = str(value).strip()
+    if not text:
+        return ''
+    try:
+        parsed = int(text)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError({field_name: '请输入有效的毫秒时间戳'}) from exc
+    if parsed <= 0:
+        raise ValidationError({field_name: '请输入有效的毫秒时间戳'})
+    return str(parsed)
+
+
+class DataFactoryBetCancelView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        require_data_factory_bet_cancel_permission(request)
+        required_fields = ('product', 'event_id', 'market_id')
+        params = {field: str(request.data.get(field, '')).strip() for field in required_fields}
+        missing = [field for field, value in params.items() if not value]
+        if missing:
+            raise ValidationError({field: '此字段不能为空' for field in missing})
+        params['specifiers'] = str(request.data.get('specifiers', '')).strip()
+        params['start_time'] = _optional_millis(request.data.get('start_time', ''), 'start_time')
+        params['end_time'] = _optional_millis(request.data.get('end_time', ''), 'end_time')
+        timestamp = request.data.get('timestamp')
+        if timestamp not in (None, ''):
+            try:
+                params['timestamp'] = int(timestamp)
+            except (TypeError, ValueError) as exc:
+                raise ValidationError({'timestamp': '请输入有效的毫秒时间戳'}) from exc
+            if params['timestamp'] <= 0:
+                raise ValidationError({'timestamp': '请输入有效的毫秒时间戳'})
+        execution = DataFactoryExecution.objects.create(
+            tool_name='取消', operator=request.user, email=params['event_id'], amount=0,
+            adjustment_id=params['market_id'],
+        )
+        try:
+            result = bet_cancel(**params)
+        except DataFactoryError as exc:
+            execution.status = 'failed'
+            execution.message = str(exc)
+            execution.save(update_fields=['status', 'message', 'updated_at'])
+            raise ValidationError(str(exc)) from exc
+        execution.status = 'passed'
+        execution.email = result['event_id']
+        execution.member_id = result['key']
+        execution.message = _format_cancel_message(result['message'], params, result['timestamp'])
+        execution.save(update_fields=['status', 'email', 'member_id', 'message', 'updated_at'])
+        return success(result, '取消已提交')
+
+
+class DataFactoryRollbackBetCancelView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        require_data_factory_rollback_bet_cancel_permission(request)
+        required_fields = ('product', 'event_id', 'market_id')
+        params = {field: str(request.data.get(field, '')).strip() for field in required_fields}
+        missing = [field for field, value in params.items() if not value]
+        if missing:
+            raise ValidationError({field: '此字段不能为空' for field in missing})
+        params['specifiers'] = str(request.data.get('specifiers', '')).strip()
+        params['start_time'] = _optional_millis(request.data.get('start_time', ''), 'start_time')
+        params['end_time'] = _optional_millis(request.data.get('end_time', ''), 'end_time')
+        timestamp = request.data.get('timestamp')
+        if timestamp not in (None, ''):
+            try:
+                params['timestamp'] = int(timestamp)
+            except (TypeError, ValueError) as exc:
+                raise ValidationError({'timestamp': '请输入有效的毫秒时间戳'}) from exc
+            if params['timestamp'] <= 0:
+                raise ValidationError({'timestamp': '请输入有效的毫秒时间戳'})
+        execution = DataFactoryExecution.objects.create(
+            tool_name='回滚取消', operator=request.user, email=params['event_id'], amount=0,
+            adjustment_id=params['market_id'],
+        )
+        try:
+            result = rollback_bet_cancel(**params)
+        except DataFactoryError as exc:
+            execution.status = 'failed'
+            execution.message = str(exc)
+            execution.save(update_fields=['status', 'message', 'updated_at'])
+            raise ValidationError(str(exc)) from exc
+        execution.status = 'passed'
+        execution.email = result['event_id']
+        execution.member_id = result['key']
+        execution.message = _format_cancel_message(result['message'], params, result['timestamp'])
+        execution.save(update_fields=['status', 'email', 'member_id', 'message', 'updated_at'])
+        return success(result, '回滚取消已提交')
+
+
+class DataFactoryRollbackSettlementView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        require_data_factory_rollback_settlement_permission(request)
+        required_fields = ('product', 'event_id', 'market_id')
+        params = {field: str(request.data.get(field, '')).strip() for field in required_fields}
+        missing = [field for field, value in params.items() if not value]
+        if missing:
+            raise ValidationError({field: '此字段不能为空' for field in missing})
+        params['specifiers'] = str(request.data.get('specifiers', '')).strip()
+        timestamp = request.data.get('timestamp')
+        if timestamp not in (None, ''):
+            try:
+                params['timestamp'] = int(timestamp)
+            except (TypeError, ValueError) as exc:
+                raise ValidationError({'timestamp': '请输入有效的毫秒时间戳'}) from exc
+            if params['timestamp'] <= 0:
+                raise ValidationError({'timestamp': '请输入有效的毫秒时间戳'})
+        execution = DataFactoryExecution.objects.create(
+            tool_name='回滚结算', operator=request.user, email=params['event_id'], amount=0,
+            adjustment_id=params['market_id'],
+        )
+        try:
+            result = rollback_bet_settlement(**params)
+        except DataFactoryError as exc:
+            execution.status = 'failed'
+            execution.message = str(exc)
+            execution.save(update_fields=['status', 'message', 'updated_at'])
+            raise ValidationError(str(exc)) from exc
+        execution.status = 'passed'
+        execution.email = result['event_id']
+        execution.member_id = result['key']
+        execution.message = result['message']
+        execution.save(update_fields=['status', 'email', 'member_id', 'message', 'updated_at'])
+        return success(result, '回滚结算已提交')
+
+
 def require_data_factory_permission(request):
     permissions = request.user.role.permissions if isinstance(request.user.role.permissions, list) else []
     if not (request.user.is_superuser or request.user.role.code == 'admin' or 'data_factory.account_balance' in permissions):
@@ -335,9 +662,35 @@ def require_order_result_push_permission(request):
         raise PermissionDenied('当前账号没有订单结果推送工具权限')
 
 
+def require_data_factory_rollback_settlement_permission(request):
+    permissions = request.user.role.permissions if isinstance(request.user.role.permissions, list) else []
+    if not (request.user.is_superuser or request.user.role.code == 'admin' or 'data_factory.rollback_settlement' in permissions):
+        raise PermissionDenied('当前账号没有回滚结算工具权限')
+
+
+def require_data_factory_bet_cancel_permission(request):
+    permissions = request.user.role.permissions if isinstance(request.user.role.permissions, list) else []
+    if not (request.user.is_superuser or request.user.role.code == 'admin' or 'data_factory.bet_cancel' in permissions):
+        raise PermissionDenied('当前账号没有取消工具权限')
+
+
+def require_data_factory_rollback_bet_cancel_permission(request):
+    permissions = request.user.role.permissions if isinstance(request.user.role.permissions, list) else []
+    if not (request.user.is_superuser or request.user.role.code == 'admin' or 'data_factory.rollback_bet_cancel' in permissions):
+        raise PermissionDenied('当前账号没有回滚取消工具权限')
+
+
 def require_data_factory_view_permission(request):
     permissions = request.user.role.permissions if isinstance(request.user.role.permissions, list) else []
-    if not (request.user.is_superuser or request.user.role.code == 'admin' or {'data_factory.view', 'data_factory.account_add', 'data_factory.account_balance', 'data_factory.order_result_push'} & set(permissions)):
+    if not (request.user.is_superuser or request.user.role.code == 'admin' or {
+        'data_factory.view',
+        'data_factory.account_add',
+        'data_factory.account_balance',
+        'data_factory.order_result_push',
+        'data_factory.rollback_settlement',
+        'data_factory.bet_cancel',
+        'data_factory.rollback_bet_cancel',
+    } & set(permissions)):
         raise PermissionDenied('当前账号没有查看数据工厂权限')
 
 
@@ -350,6 +703,24 @@ class DataFactoryExecutionView(APIView):
         paginator = StandardPagination()
         page = paginator.paginate_queryset(queryset, request)
         return paginator.get_paginated_response(DataFactoryExecutionSerializer(page, many=True).data)
+
+
+class DataFactoryEnvironmentView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        require_data_factory_view_permission(request)
+        environments = Environment.objects.order_by('-is_default', 'name').values(
+            'id', 'name', 'description', 'base_url', 'login_url', 'is_default',
+        )
+        return success([
+            {
+                **environment,
+                # Tool users need the selected environment's addresses, never its secrets.
+                'variables': [],
+            }
+            for environment in environments
+        ])
 
 
 class RoleViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
@@ -398,7 +769,7 @@ class RoleViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
 
 class UserViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
     queryset = User.objects.select_related('role').all().order_by('-created_at')
-    action_permissions = {'list':'users.view','retrieve':'users.view','create':'users.manage','update':'users.manage','partial_update':'users.manage','destroy':'users.delete','reset_password':'users.manage'}
+    action_permissions = {'list':'users.view','retrieve':'users.view','create':'users.manage','update':'users.manage','partial_update':'users.manage','destroy':'users.delete','reset_password':'users.manage','toggle_status':'users.status'}
 
     def get_serializer_class(self):
         return UserCreateSerializer if self.action == 'create' else UserSerializer
@@ -428,6 +799,20 @@ class UserViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
             raise ValidationError('admin 账号必须保留系统管理员角色')
         serializer.save()
         return success(serializer.data, '用户更新成功')
+
+    @action(detail=True, methods=['post'], url_path='toggle-status')
+    def toggle_status(self, request, pk=None):
+        user = self.get_object()
+        is_active = request.data.get('is_active')
+        if not isinstance(is_active, bool):
+            raise ValidationError({'is_active': '请传入布尔值'})
+        if not is_active and user.pk == request.user.pk:
+            raise ValidationError('不能停用当前登录账号')
+        if not is_active and (user.username == 'admin' or user.role.code == 'admin'):
+            raise ValidationError('管理员账号不允许停用')
+        user.is_active = is_active
+        user.save(update_fields=['is_active', 'updated_at'])
+        return success(UserSerializer(user).data, '用户状态已更新')
 
     def destroy(self, request, *args, **kwargs):
         user = self.get_object()

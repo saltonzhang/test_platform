@@ -37,14 +37,14 @@
       </button>
 
       <button
-        v-if="hasPermission('data_factory.order_result_push')"
+        v-if="hasAnyPermission(['data_factory.order_result_push','data_factory.rollback_settlement','data_factory.bet_cancel','data_factory.rollback_bet_cancel'])"
         class="data-factory-card"
         type="button"
         @click="orderResultPushVisible = true"
       >
         <span class="data-factory-icon green"><el-icon><Promotion /></el-icon></span>
-        <strong>订单结果推送</strong>
-        <small>生成消息 Key 并推送订单结算结果</small>
+        <strong>订单结果处理</strong>
+        <small>推送订单结果，或执行回滚结算、取消和回滚取消</small>
         <b>可用</b>
       </button>
 
@@ -122,6 +122,10 @@ const history = ref<DataFactoryExecution[]>([])
 const historyTotal = ref(0)
 const historyQuery = reactive({ page: 1, pageSize: 10 })
 
+function hasAnyPermission(codes: string[]) {
+  return codes.some(hasPermission)
+}
+
 async function loadHistory() {
   historyLoading.value = true
   try {
@@ -158,8 +162,8 @@ function formatTime(value: string) {
 
 onMounted(async () => {
   try {
-    const response = await api.getEnvironments()
-    environments.value = Array.isArray(response) ? response : response.data
+    const response = await api.getDataFactoryEnvironments()
+    environments.value = response.data
   } catch (error) {
     ElMessage.error((error as Error).message)
   }

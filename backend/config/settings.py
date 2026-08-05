@@ -90,6 +90,17 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 CORS_ALLOWED_ORIGINS = [item.strip() for item in os.getenv('CORS_ALLOWED_ORIGINS', 'http://localhost:4173,http://127.0.0.1:4173').split(',') if item.strip()]
 FEISHU_BOT_WEBHOOK_URL = os.getenv('FEISHU_BOT_WEBHOOK_URL', '')
 FEISHU_BOT_SSL_VERIFY = os.getenv('FEISHU_BOT_SSL_VERIFY', 'true').lower() in {'1', 'true', 'yes'}
+LARK_APP_ID = os.getenv('LARK_APP_ID', os.getenv('AppID', ''))
+LARK_APP_SECRET = os.getenv('LARK_APP_SECRET', os.getenv('AppSecret', ''))
+LARK_REDIRECT_URI = os.getenv('LARK_REDIRECT_URI', '')
+LARK_FRONTEND_URL = os.getenv('LARK_FRONTEND_URL', 'http://localhost:4173').rstrip('/')
+LARK_OPEN_BASE_URL = os.getenv('LARK_OPEN_BASE_URL', 'https://open.feishu.cn').rstrip('/')
+LARK_DEFAULT_ROLE_CODE = os.getenv('LARK_DEFAULT_ROLE_CODE', 'viewer')
+SESSION_COOKIE_DOMAIN = os.getenv('SESSION_COOKIE_DOMAIN', '').strip() or None
+DATA_FACTORY_FRONTEND_ACCOUNT = os.getenv('DATA_FACTORY_FRONTEND_ACCOUNT', '').strip()
+DATA_FACTORY_FRONTEND_PASSWORD = os.getenv('DATA_FACTORY_FRONTEND_PASSWORD', '')
+DATA_FACTORY_BACKEND_ACCOUNT = os.getenv('DATA_FACTORY_BACKEND_ACCOUNT', '').strip()
+DATA_FACTORY_BACKEND_PASSWORD = os.getenv('DATA_FACTORY_BACKEND_PASSWORD', '')
 if not DEBUG:
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
     SECURE_SSL_REDIRECT = True

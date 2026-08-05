@@ -25,6 +25,9 @@ class Role(models.Model):
 class User(AbstractUser):
     name = models.CharField('姓名', max_length=50)
     role = models.ForeignKey(Role, on_delete=models.PROTECT, related_name='users', verbose_name='角色')
+    lark_union_id = models.CharField('Lark Union ID', max_length=128, unique=True, null=True, blank=True)
+    lark_open_id = models.CharField('Lark Open ID', max_length=128, blank=True, default='')
+    created_via = models.CharField('创建来源', max_length=20, choices=[('manual', '手动创建'), ('lark_sso', 'Lark 免登')], default='manual')
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
     updated_at = models.DateTimeField('更新时间', auto_now=True)
 
@@ -58,6 +61,24 @@ class Environment(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class UserEnvironmentAccount(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='environment_accounts', verbose_name='用户')
+    environment = models.ForeignKey(Environment, on_delete=models.CASCADE, related_name='user_accounts', verbose_name='运行环境')
+    account = models.CharField('目标系统账号', max_length=100)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'aibet_user_environment_account'
+        db_table_comment = '用户运行环境账号配置表'
+        verbose_name = '用户环境账号'
+        verbose_name_plural = '用户环境账号'
+        constraints = [models.UniqueConstraint(fields=['user', 'environment'], name='uniq_user_environment_account')]
+
+    def __str__(self):
+        return f'{self.user.display_name} - {self.environment.name}'
 
 
 class DataFactoryExecution(models.Model):

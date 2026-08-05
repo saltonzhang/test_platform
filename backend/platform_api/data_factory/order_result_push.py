@@ -9,6 +9,9 @@ from .account_balance import DataFactoryError
 
 
 ORDER_RESULT_PUSH_URL = 'http://54.69.237.139:8080/api/clusters/local/topics/msg_bet_settlement/messages'
+BET_CANCEL_URL = 'http://54.69.237.139:8080/api/clusters/local/topics/msg_bet_cancel/messages'
+ROLLBACK_BET_CANCEL_URL = 'http://54.69.237.139:8080/api/clusters/local/topics/msg_rollback_bet_cancel/messages'
+ROLLBACK_BET_SETTLEMENT_URL = 'http://54.69.237.139:8080/api/clusters/local/topics/msg_rollback_bet_settlement/messages'
 
 SALT = '6rx7aXuTnVtM1ZMXOgJNHX9cmibQs3vAOApvT9KPQev+v2Sa5G9QnH+E483CwmTi+gBCHZWTYLN8EMCjX94B3RPMh44WQUCS/24o75Tr97sLzz5z5ZLtFbQQDtvLgj2n'
 WELLKNOWN_ABBREVIATIONS = {
@@ -118,6 +121,36 @@ def build_settlement_content(*, certainty, product, event_id, market_id, specifi
     )
 
 
+def build_rollback_settlement_content(*, product, event_id, market_id, specifiers, timestamp):
+    market_attrs = f'id={_xml_attribute(market_id)}'
+    if specifiers:
+        market_attrs += f' specifiers={_xml_attribute(specifiers)}'
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n'
+        f'<rollback_bet_settlement product={_xml_attribute(product)} event_id={_xml_attribute(event_id)} timestamp={_xml_attribute(timestamp)}>'
+        f'<market {market_attrs}/>\r\n'
+        '</rollback_bet_settlement>'
+    )
+
+
+def build_cancel_content(*, product, event_id, market_id, specifiers, start_time='', end_time='', timestamp):
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n'
+        f'<bet_cancel start_time={_xml_attribute(start_time)} end_time={_xml_attribute(end_time)} product={_xml_attribute(product)} event_id={_xml_attribute(event_id)} timestamp={_xml_attribute(timestamp)}>'
+        f'<market void_reason="4" id={_xml_attribute(market_id)} specifiers={_xml_attribute(specifiers)}/>\r\n'
+        '</bet_cancel>'
+    )
+
+
+def build_rollback_cancel_content(*, product, event_id, market_id, specifiers, start_time='', end_time='', timestamp):
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n'
+        f'<rollback_bet_cancel start_time={_xml_attribute(start_time)} end_time={_xml_attribute(end_time)} product={_xml_attribute(product)} event_id={_xml_attribute(event_id)} timestamp={_xml_attribute(timestamp)}>'
+        f'<market id={_xml_attribute(market_id)} specifiers={_xml_attribute(specifiers)}/>\r\n'
+        '</rollback_bet_cancel>'
+    )
+
+
 def push_order_result(**params):
     timestamp = params.get('timestamp') or int(time() * 1000)
     submitted_event_id = str(params['event_id']).strip()
@@ -149,3 +182,104 @@ def push_order_result(**params):
     if outcome.status != 'passed':
         raise DataFactoryError(outcome.message)
     return {'key': key, 'event_id': event_id, 'outcome_id': outcome_id, 'timestamp': timestamp, 'status_code': 200, 'message': outcome.message, 'response': response, 'payload': payload}
+
+
+def bet_cancel(**params):
+    timestamp = params.get('timestamp') or int(time() * 1000)
+    submitted_event_id = str(params['event_id']).strip()
+    event_id = decode_unsafe(submitted_event_id) or submitted_event_id
+    try:
+        encode(event_id)
+    except ValueError as exc:
+        raise DataFactoryError(f'event_id 格式无效：{exc}') from exc
+    key = event_id
+    content = build_cancel_content(
+        product=params['product'], event_id=event_id,
+        market_id=params['market_id'], specifiers=params.get('specifiers', ''),
+        start_time=params.get('start_time', ''), end_time=params.get('end_time', ''),
+        timestamp=timestamp,
+    )
+    payload = {'partition': 0, 'key': key, 'content': content, 'keySerde': 'String', 'valueSerde': 'String'}
+    outcome = api_request_executor.execute(
+        url=BET_CANCEL_URL, method='POST', headers={'Content-Type': 'application/json'},
+        request_params=payload, assertions={'status_code': 200, 'timeout_seconds': 15},
+    )
+    response = outcome.response_log
+    if outcome.status != 'passed':
+        raise DataFactoryError(outcome.message)
+    return {
+        'key': key,
+        'event_id': event_id,
+        'timestamp': timestamp,
+        'status_code': 200,
+        'message': outcome.message,
+        'response': response,
+        'payload': payload,
+    }
+
+
+def rollback_bet_cancel(**params):
+    timestamp = params.get('timestamp') or int(time() * 1000)
+    submitted_event_id = str(params['event_id']).strip()
+    event_id = decode_unsafe(submitted_event_id) or submitted_event_id
+    try:
+        encode(event_id)
+    except ValueError as exc:
+        raise DataFactoryError(f'event_id 格式无效：{exc}') from exc
+    key = event_id
+    content = build_rollback_cancel_content(
+        product=params['product'], event_id=event_id,
+        market_id=params['market_id'], specifiers=params.get('specifiers', ''),
+        start_time=params.get('start_time', ''), end_time=params.get('end_time', ''),
+        timestamp=timestamp,
+    )
+    payload = {'partition': 0, 'key': key, 'content': content, 'keySerde': 'String', 'valueSerde': 'String'}
+    outcome = api_request_executor.execute(
+        url=ROLLBACK_BET_CANCEL_URL, method='POST', headers={'Content-Type': 'application/json'},
+        request_params=payload, assertions={'status_code': 200, 'timeout_seconds': 15},
+    )
+    response = outcome.response_log
+    if outcome.status != 'passed':
+        raise DataFactoryError(outcome.message)
+    return {
+        'key': key,
+        'event_id': event_id,
+        'timestamp': timestamp,
+        'status_code': 200,
+        'message': outcome.message,
+        'response': response,
+        'payload': payload,
+    }
+
+
+def rollback_bet_settlement(**params):
+    timestamp = params.get('timestamp') or int(time() * 1000)
+    submitted_event_id = str(params['event_id']).strip()
+    event_id = decode_unsafe(submitted_event_id) or submitted_event_id
+    try:
+        encode(event_id)
+    except ValueError as exc:
+        raise DataFactoryError(f'event_id 格式无效：{exc}') from exc
+    key = event_id
+    content = build_rollback_settlement_content(
+        product=params['product'], event_id=event_id,
+        market_id=params['market_id'], specifiers=params.get('specifiers', ''),
+        timestamp=timestamp,
+    )
+    payload = {'partition': 0, 'key': key, 'content': content, 'keySerde': 'String', 'valueSerde': 'String'}
+    outcome = api_request_executor.execute(
+        url=ROLLBACK_BET_SETTLEMENT_URL, method='POST', headers={'Content-Type': 'application/json'},
+        request_params=payload, assertions={'status_code': 200, 'timeout_seconds': 15},
+    )
+    response = outcome.response_log
+    if outcome.status != 'passed':
+        raise DataFactoryError(outcome.message)
+    return {
+        'key': key,
+        'event_id': event_id,
+        'timestamp': timestamp,
+        'status_code': 200,
+        'message': outcome.message,
+        'response': response,
+        'payload': payload,
+    }

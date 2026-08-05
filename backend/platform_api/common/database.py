@@ -2,6 +2,7 @@
 
 from contextlib import contextmanager
 import os
+import re
 from pathlib import Path
 
 import pymysql
@@ -9,6 +10,23 @@ import pymysql.cursors
 
 
 _LOCAL_ENV_PATH = Path(__file__).resolve().parents[2] / '.env'
+_DB_ENV_PREFIX = 'DATA_FACTORY_DB'
+_DB_PROFILE_ENV = f'{_DB_ENV_PREFIX}_PROFILE'
+_DB_FIELD_ENV_SUFFIXES = {
+    'host': 'HOST',
+    'port': 'PORT',
+    'user': 'USER',
+    'password': 'PASSWORD',
+    'database': 'NAME',
+    'charset': 'CHARSET',
+    'connect_timeout': 'CONNECT_TIMEOUT',
+    'read_timeout': 'READ_TIMEOUT',
+    'write_timeout': 'WRITE_TIMEOUT',
+}
+_DB_REQUIRED_FIELDS = ('host', 'port', 'user', 'password', 'database')
+_DB_OPTIONAL_FIELDS = ('charset', 'connect_timeout', 'read_timeout', 'write_timeout')
+_DB_INTEGER_FIELDS = {'port', 'connect_timeout', 'read_timeout', 'write_timeout'}
+_DB_DEFAULT_PROFILE_NAMES = {'', 'default', 'legacy'}
 
 
 def _load_local_env(path=_LOCAL_ENV_PATH):
@@ -46,47 +64,118 @@ def _get_int_env(name):
         raise ValueError(f'{name} 必须为整数') from exc
 
 
+def _normalize_db_profile(profile):
+    if profile is None:
+        return None
+    value = str(profile).strip()
+    if not value or value.lower() in _DB_DEFAULT_PROFILE_NAMES:
+        return None
+    return value
+
+
+def _selected_db_profile():
+    return _normalize_db_profile(os.getenv(_DB_PROFILE_ENV))
+
+
+def _db_env_prefix(profile=None):
+    profile_name = _normalize_db_profile(profile)
+    if profile_name is None:
+        return _DB_ENV_PREFIX
+    token = re.sub(r'[^0-9A-Za-z]+', '_', profile_name).strip('_').upper()
+    if not token:
+        raise ValueError('DATA_FACTORY_DB_PROFILE 不能为空')
+    return f'{_DB_ENV_PREFIX}_{token}'
+
+
+def _get_env_database_value(field, profile=None):
+    env_name = f'{_db_env_prefix(profile)}_{_DB_FIELD_ENV_SUFFIXES[field]}'
+    value = os.getenv(env_name)
+    if value in (None, ''):
+        return None
+    if field in _DB_INTEGER_FIELDS:
+        try:
+            return int(value)
+        except ValueError as exc:
+            raise ValueError(f'{env_name} 必须为整数') from exc
+    return value
+
+
+def _read_env_database_config(profile=None, *, allow_generic_fallback=False):
+    config = {field: _get_env_database_value(field, profile) for field in _DB_FIELD_ENV_SUFFIXES}
+    if allow_generic_fallback and _normalize_db_profile(profile) is not None:
+        for field in _DB_OPTIONAL_FIELDS:
+            if config.get(field) in (None, ''):
+                config[field] = _get_env_database_value(field)
+    return config
+
+
 _load_local_env()
 
 # Values are read from backend/.env or the process environment.
+# Use DATA_FACTORY_DB_PROFILE to switch among multiple groups; omit it to keep
+# using the legacy DATA_FACTORY_DB_* group. For example:
+#   DATA_FACTORY_DB_PROFILE=report
+#   DATA_FACTORY_DB_REPORT_HOST=...
+#   DATA_FACTORY_DB_REPORT_PORT=...
 DATA_FACTORY_DATABASE_CONFIG = {
-    'host': os.getenv('DATA_FACTORY_DB_HOST'),
-    'port': _get_int_env('DATA_FACTORY_DB_PORT'),
-    'user': os.getenv('DATA_FACTORY_DB_USER'),
-    'password': os.getenv('DATA_FACTORY_DB_PASSWORD'),
-    'database': os.getenv('DATA_FACTORY_DB_NAME'),
-    'charset': os.getenv('DATA_FACTORY_DB_CHARSET'),
+    **_read_env_database_config(_selected_db_profile(), allow_generic_fallback=True),
     'cursorclass': pymysql.cursors.DictCursor,
-    'connect_timeout': _get_int_env('DATA_FACTORY_DB_CONNECT_TIMEOUT'),
-    'read_timeout': _get_int_env('DATA_FACTORY_DB_READ_TIMEOUT'),
-    'write_timeout': _get_int_env('DATA_FACTORY_DB_WRITE_TIMEOUT'),
 }
 
 # Keep the shorter name used by existing callers.
 DB_CONFIG = DATA_FACTORY_DATABASE_CONFIG
 
 
-def _build_db_config(config=None, **overrides):
-    db_config = dict(config or DB_CONFIG)
+def _build_db_config(config=None, *, profile=None, **overrides):
+    source_is_env = config is None
+    if config is None:
+        db_config = _read_env_database_config(
+            _selected_db_profile() if profile is None else profile,
+            allow_generic_fallback=True,
+        )
+    else:
+        db_config = dict(config)
     db_config.update({key: value for key, value in overrides.items() if value is not None})
+    for field in _DB_INTEGER_FIELDS:
+        value = db_config.get(field)
+        if value in (None, '') or isinstance(value, int):
+            continue
+        try:
+            db_config[field] = int(value)
+        except (TypeError, ValueError) as exc:
+            if source_is_env:
+                env_name = f'{_db_env_prefix(profile if profile is not None else _selected_db_profile())}_{_DB_FIELD_ENV_SUFFIXES[field]}'
+                raise ValueError(f'{env_name} 必须为整数') from exc
+            raise ValueError(f'{field} 必须为整数') from exc
+    db_config.setdefault('cursorclass', pymysql.cursors.DictCursor)
     missing = [
         key
-        for key in ('host', 'port', 'user', 'password', 'database')
+        for key in _DB_REQUIRED_FIELDS
         if db_config.get(key) is None or (key != 'password' and db_config.get(key) == '')
     ]
     if missing:
-        env_names = ', '.join(f'DATA_FACTORY_DB_{"NAME" if key == "database" else key.upper()}' for key in missing)
-        raise RuntimeError(f'缺少数据工厂数据库配置，请在 backend/.env 中设置：{env_names}')
+        if source_is_env:
+            env_prefix = _db_env_prefix(profile if profile is not None else _selected_db_profile())
+            env_names = ', '.join(f'{env_prefix}_{_DB_FIELD_ENV_SUFFIXES[key]}' for key in missing)
+            profile_hint = profile if profile is not None else _selected_db_profile()
+            profile_text = f'（profile={profile_hint}）' if profile_hint else ''
+            raise RuntimeError(f'缺少数据工厂数据库配置{profile_text}，请在 backend/.env 中设置：{env_names}')
+        raise RuntimeError(f'缺少数据库配置：{", ".join(missing)}')
     return {key: value for key, value in db_config.items() if value is not None}
 
 
-def get_db_connection(config=None, **overrides):
-    return pymysql.connect(**_build_db_config(config, **overrides))
+def get_database_config(config=None, *, profile=None, **overrides):
+    """Resolve the final MySQL connection config without opening a socket."""
+    return _build_db_config(config, profile=profile, **overrides)
+
+
+def get_db_connection(config=None, *, profile=None, **overrides):
+    return pymysql.connect(**_build_db_config(config, profile=profile, **overrides))
 
 
 @contextmanager
-def db_connection(config=None, **overrides):
-    conn = get_db_connection(config=config, **overrides)
+def db_connection(config=None, *, profile=None, **overrides):
+    conn = get_db_connection(config=config, profile=profile, **overrides)
     try:
         yield conn
     finally:
@@ -96,8 +185,8 @@ def db_connection(config=None, **overrides):
 class DatabaseClient:
     """Small PyMySQL wrapper for one data-factory database session."""
 
-    def __init__(self, config=None, **overrides):
-        self.config = _build_db_config(config, **overrides)
+    def __init__(self, config=None, *, profile=None, **overrides):
+        self.config = _build_db_config(config, profile=profile, **overrides)
         self.connection = None
 
     def __enter__(self):
@@ -175,20 +264,21 @@ def execute_sql(
     commit=False,
     many=False,
     config=None,
+    profile=None,
     **overrides,
 ):
     fetch_mode = _resolve_fetch_mode(fetch, fetch_one, fetch_all)
-    with DatabaseClient(config=config, **overrides) as db:
+    with DatabaseClient(config=config, profile=profile, **overrides) as db:
         return db.execute(sql, params, fetch=fetch_mode, commit=commit, many=many)
 
 
-def query_one(sql, params=None, *, config=None, **overrides):
-    return execute_sql(sql, params, fetch='one', config=config, **overrides)
+def query_one(sql, params=None, *, config=None, profile=None, **overrides):
+    return execute_sql(sql, params, fetch='one', config=config, profile=profile, **overrides)
 
 
-def query_all(sql, params=None, *, config=None, **overrides):
-    return execute_sql(sql, params, fetch='all', config=config, **overrides)
+def query_all(sql, params=None, *, config=None, profile=None, **overrides):
+    return execute_sql(sql, params, fetch='all', config=config, profile=profile, **overrides)
 
 
-def execute_write(sql, params=None, *, many=False, config=None, **overrides):
-    return execute_sql(sql, params, commit=True, many=many, config=config, **overrides)
+def execute_write(sql, params=None, *, many=False, config=None, profile=None, **overrides):
+    return execute_sql(sql, params, commit=True, many=many, config=config, profile=profile, **overrides)

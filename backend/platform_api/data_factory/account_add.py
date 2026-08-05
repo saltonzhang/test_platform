@@ -1,5 +1,5 @@
 import json
-import re
+import secrets
 import time
 from datetime import timedelta
 from decimal import Decimal
@@ -14,7 +14,6 @@ from ..common.login import execute_platform_login, extract_token_user_id, get_lo
 from ..executor import api_request_executor
 from ..models import Environment
 from .account_balance import DataFactoryError, execute_account_balance
-
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -38,8 +37,7 @@ def check_member_exists(email):
         row = query_one('SELECT id FROM member WHERE email = %s LIMIT 1', (email,))
         return row['id'] if row else None
     except Exception as exc:
-        print(f'❌ 查询账号是否存在时出错: {exc}')
-        return None
+        raise DataFactoryError(f'查询账号是否存在时出错: {exc}') from exc
 
 
 def query_kyc_info_from_db(email):
@@ -83,24 +81,65 @@ def query_kyc_info_from_db(email):
         return None, None, None, None
 
 
-def get_brazil_id():
-    url = 'https://www.shenfendaquan.com/Index/index/ba_xi_ren_shen_fen_sheng_cheng'
-    headers = {
-        'User-Agent': (
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
-            'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36'
-        )
-    }
+def mark_kyc_passed(member_id):
+    member_id_value = str(member_id or '').strip()
+    if not member_id_value:
+        raise DataFactoryError('未能从数据库中找到 member_id')
+
+    print('\n================ [通过数据库直接标记 KYC 已通过] ================')
+    sql = '''
+        UPDATE member_extra
+        SET kyc_status = 2, kyc_passed = 1, kyc_level = 2
+        WHERE member_id = %s
+    '''
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        match = re.search(r'\d{3}\.\d{3}\.\d{3}-\d{2}', response.text)
-        if match:
-            return match.group(0)
-        raise ValueError('未匹配到 CPF 格式')
+        with DatabaseClient() as db:
+            affected_rows = db.execute_write(sql, (member_id_value,))
+        if not affected_rows:
+            raise DataFactoryError(f'member_extra 未找到对应记录: member_id={member_id_value}')
+        print(f'✅ 已更新 member_extra KYC 状态: member_id={member_id_value}')
+        return affected_rows
+    except DataFactoryError:
+        raise
     except Exception as exc:
-        print(f'❌ 获取 CPF 失败: {exc}')
-        return None
+        raise DataFactoryError(f'更新 member_extra KYC 状态失败: {exc}') from exc
+
+
+# def get_brazil_id():
+#     url = 'https://www.shenfendaquan.com/Index/index/ba_xi_ren_shen_fen_sheng_cheng'
+#     headers = {
+#         'User-Agent': (
+#             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+#             'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36'
+#         )
+#     }
+#     try:
+#         response = requests.get(url, headers=headers, timeout=10)
+#         response.raise_for_status()
+#         match = re.search(r'\d{3}\.\d{3}\.\d{3}-\d{2}', response.text)
+#         if match:
+#             return match.group(0)
+#         raise ValueError('未匹配到 CPF 格式')
+#     except Exception as exc:
+#         print(f'❌ 获取 CPF 失败: {exc}')
+#         return None
+
+def _cpf_check_digit(digits, first_weight):
+    total = sum(digit * weight for digit, weight in zip(digits, range(first_weight, 1, -1)))
+    remainder = (total * 10) % 11
+    return 0 if remainder == 10 else remainder
+
+
+def get_brazil_id() -> str:
+    """Generate a CPF-format test id locally without browser or network dependencies."""
+    while True:
+        digits = [secrets.randbelow(10) for _ in range(9)]
+        if len(set(digits)) > 1:
+            break
+    first_digit = _cpf_check_digit(digits, 10)
+    second_digit = _cpf_check_digit([*digits, first_digit], 11)
+    value = ''.join(str(digit) for digit in [*digits, first_digit, second_digit])
+    return f'{value[:3]}.{value[3:6]}.{value[6:9]}-{value[9:]}'
 
 
 def extract_token_str(res_json, response_headers):
@@ -139,6 +178,7 @@ def _response_message(res_json, fallback=''):
 
 
 def _login_registered_account(environment, email, password):
+    # 注册后的 KYC 必须使用本次新建会员身份，不能替换为固定前台工具账号。
     login_url = getattr(environment, 'login_url', '') or _url(
         getattr(environment, 'base_url', ''), '/api/v1/auth/login',
     )
@@ -220,32 +260,32 @@ def get_kyc_url(environment, token):
         raise DataFactoryError(f'KYC 认证失败：{message or f"HTTP {response.status_code}"}')
 
 
-def trigger_face_verification_webhook(protocol, document, email):
-    print('\n================ [调用 Webhook 完成人脸认证] ================')
-    webhook_url = 'https://webhook-test.matchday.ink/tobapi/v1/kyc/serasaexperian'
-    payload = {
-        'protocol': protocol,
-        'document': document,
-        'status': 'CONCLUIDO',
-        'result': 'SEM RISCO APARENTE',
-        'alerts': ['FOTO DO CLIENTE'],
-        'userInformation': {
-            'fullName': 'Joao Jose Nascimento Dos Santos',
-            'gender': 'M',
-            'birthDate': '1990-01-01',
-            'nationality': 'BRASILEIRO',
-            'email': email,
-            'phone': {'areaCode': '11', 'number': '999999999'},
-        },
-    }
-    headers = {'Content-Type': 'application/json'}
-    print(f'🚀 Webhook 请求参数:\n{json.dumps(payload, indent=2, ensure_ascii=False)}')
-    try:
-        response = requests.post(webhook_url, headers=headers, json=payload, timeout=10)
-        print(f'✅ Webhook 响应状态码: {response.status_code}')
-        print(f'✅ Webhook 响应内容: {response.text}')
-    except Exception as exc:
-        print(f'❌ Webhook 请求失败: {exc}')
+# def trigger_face_verification_webhook(protocol, document, email):
+#     print('\n================ [调用 Webhook 完成人脸认证] ================')
+#     webhook_url = 'https://webhook-test.matchday.ink/tobapi/v1/kyc/serasaexperian'
+#     payload = {
+#         'protocol': protocol,
+#         'document': document,
+#         'status': 'CONCLUIDO',
+#         'result': 'SEM RISCO APARENTE',
+#         'alerts': ['FOTO DO CLIENTE'],
+#         'userInformation': {
+#             'fullName': 'Joao Jose Nascimento Dos Santos',
+#             'gender': 'M',
+#             'birthDate': '1990-01-01',
+#             'nationality': 'BRASILEIRO',
+#             'email': email,
+#             'phone': {'areaCode': '11', 'number': '999999999'},
+#         },
+#     }
+#     headers = {'Content-Type': 'application/json'}
+#     print(f'🚀 Webhook 请求参数:\n{json.dumps(payload, indent=2, ensure_ascii=False)}')
+#     try:
+#         response = requests.post(webhook_url, headers=headers, json=payload, timeout=10)
+#         print(f'✅ Webhook 响应状态码: {response.status_code}')
+#         print(f'✅ Webhook 响应内容: {response.text}')
+#     except Exception as exc:
+#         print(f'❌ Webhook 请求失败: {exc}')
 
 
 """
@@ -253,7 +293,8 @@ def trigger_face_verification_webhook(protocol, document, email):
 账户添加统一调用 account_balance.execute_account_balance，避免重复维护登录、
 创建加款单、查询加款单和审批逻辑；保留原实现文本便于后续追溯。
 
-def mgt_login(environment, username='test01', password='Admin123!'):
+def mgt_login(environment):
+    username, password = get_data_factory_credentials('backend')
     print('\n================ [后台管理员登录] ================')
     login_url = getattr(environment, 'login_url', '')
     if not login_url:
@@ -412,7 +453,7 @@ def _build_account_add_result(frontend_environment, backend_environment, email, 
     }
 
 
-def _run_single_account(frontend_environment, backend_environment, username='test01', password='Admin123!', email='', amount=5000, max_retries=60, operator=None):
+def _run_single_account(frontend_environment, backend_environment, email='', amount=5000, max_retries=60):
     email_clean = str(email or '').strip().lower()
     amount_value = _normalize_account_add_amount(amount)
     base_url = getattr(frontend_environment, 'base_url', '')
@@ -421,9 +462,6 @@ def _run_single_account(frontend_environment, backend_environment, username='tes
         raise DataFactoryError('请选择已配置前台地址的运行环境')
     if not login_url:
         raise DataFactoryError('请选择已配置后台登录地址的运行环境')
-    if not username or operator is None or not getattr(operator, 'username', ''):
-        raise DataFactoryError('当前用户未配置后台账号')
-
     if email_clean:
         existing_member_id = check_member_exists(email_clean)
         if existing_member_id:
@@ -431,9 +469,7 @@ def _run_single_account(frontend_environment, backend_environment, username='tes
             balance_result = None
             if amount_value > 0:
                 print(f'🔍 Member ID: {existing_member_id}。直接跳过注册与 KYC 认证，调用账户余额工具充值...')
-                balance_result = execute_account_balance(
-                    operator, password, backend_environment.id, email_clean, amount_value,
-                )
+                balance_result = execute_account_balance(backend_environment.id, email_clean, amount_value)
             else:
                 print(f'🔍 Member ID: {existing_member_id}。未填写金额，跳过账户余额操作。')
             return _build_account_add_result(
@@ -536,25 +572,20 @@ def _run_single_account(frontend_environment, backend_environment, username='tes
             member_id, uuid, protocol, document = query_kyc_info_from_db(email_identifier)
             if not member_id:
                 raise DataFactoryError('未能从数据库中找到 member_id')
-            if protocol and document:
-                print(
-                    f'🎯 查库解析成功!\n -> member_id: {member_id}\n -> user_id (uuid): {uuid}\n'
-                    f' -> protocol (serasa_validation_id): {protocol}\n -> document (CPF): {document}'
-                )
-                trigger_face_verification_webhook(protocol, document, email_identifier)
-                balance_result = None
-                if amount_value > 0:
-                    balance_result = execute_account_balance(
-                        operator, password, backend_environment.id, email_identifier, amount_value,
-                    )
-                else:
-                    print('未填写金额，跳过账户余额操作。')
-                return _build_account_add_result(
-                    frontend_environment, backend_environment, email_identifier, balance_result, member_id,
-                    status='registered',
-                )
-
-            raise DataFactoryError('未能从数据库中成功提取 KYC 变量')
+            print(
+                f'🎯 查库解析成功!\n -> member_id: {member_id}\n -> user_id (uuid): {uuid}\n'
+                f' -> protocol (serasa_validation_id): {protocol}\n -> document (CPF): {document}'
+            )
+            mark_kyc_passed(member_id)
+            balance_result = None
+            if amount_value > 0:
+                balance_result = execute_account_balance(backend_environment.id, email_identifier, amount_value)
+            else:
+                print('未填写金额，跳过账户余额操作。')
+            return _build_account_add_result(
+                frontend_environment, backend_environment, email_identifier, balance_result, member_id,
+                status='registered',
+            )
         except DataFactoryError as exc:
             last_error = exc
             print(f'❌ 运行过程中发生错误: {exc}')
@@ -565,7 +596,7 @@ def _run_single_account(frontend_environment, backend_environment, username='tes
     raise DataFactoryError('注册与认证流程执行失败')
 
 
-def run_full_automation(frontend_environment, backend_environment, username='test01', password='Admin123!', email='', amount=5000, max_retries=60, operator=None, quantity=1):
+def run_full_automation(frontend_environment, backend_environment, email='', amount=5000, max_retries=60, quantity=1):
     """按数量注册账号；每个账号内部仍使用 max_retries 重试注册流程。"""
     try:
         account_count = int(quantity)
@@ -583,12 +614,9 @@ def run_full_automation(frontend_environment, backend_environment, username='tes
             _run_single_account(
                 frontend_environment,
                 backend_environment,
-                username=username,
-                password=password,
                 email=email,
                 amount=amount,
                 max_retries=max_retries,
-                operator=operator,
             )
         )
 
@@ -603,7 +631,7 @@ def run_full_automation(frontend_environment, backend_environment, username='tes
     return result
 
 
-def execute_account_add(operator, password, frontend_environment_id, backend_environment_id, email, amount, quantity):
+def execute_account_add(frontend_environment_id, backend_environment_id, email, amount, quantity):
     amount_value = _normalize_account_add_amount(amount)
     frontend_environment = Environment.objects.filter(pk=frontend_environment_id).first()
     if not frontend_environment:
@@ -615,8 +643,6 @@ def execute_account_add(operator, password, frontend_environment_id, backend_env
         raise DataFactoryError('请选择已配置前台地址的运行环境')
     if not getattr(backend_environment, 'login_url', ''):
         raise DataFactoryError('请选择已配置后台登录地址的运行环境')
-    if not password:
-        raise DataFactoryError('请输入系统密码')
     try:
         account_count = int(quantity)
     except (TypeError, ValueError) as exc:
@@ -626,11 +652,8 @@ def execute_account_add(operator, password, frontend_environment_id, backend_env
     automation_result = run_full_automation(
         frontend_environment,
         backend_environment,
-        username=getattr(operator, 'username', ''),
-        password=password,
         email=email,
         amount=amount_value,
-        operator=operator,
         quantity=account_count,
     )
     return {

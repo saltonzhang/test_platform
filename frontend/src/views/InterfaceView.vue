@@ -7,7 +7,7 @@
           <el-option v-for="item in BUSINESS_MODULES" :key="item" :label="item" :value="item" />
         </el-select>
         <span>共 {{ total }} 个接口</span>
-        <div class="interface-actions"><el-button type="success" @click="batchDialog = true"><el-icon><Upload /></el-icon>批量录入</el-button><el-button type="primary" @click="openForm()"><el-icon><Plus /></el-icon>新建接口</el-button></div>
+        <div class="interface-actions"><el-button v-if="hasPermission('automation.create')" type="success" @click="batchDialog = true"><el-icon><Upload /></el-icon>批量录入</el-button><el-button v-if="hasPermission('automation.create')" type="primary" @click="openForm()"><el-icon><Plus /></el-icon>新建接口</el-button></div>
       </div>
       <el-table v-loading="loading" :data="interfaces" empty-text="暂无接口">
         <el-table-column prop="name" label="接口名称" min-width="170" />
@@ -17,9 +17,9 @@
         <el-table-column prop="api_type" label="接口类型" width="100" />
         <el-table-column label="关联标记" width="100"><template #default="{ row }"><el-tag v-if="row.reference_enabled" type="warning" effect="plain">已关联</el-tag><span v-else class="muted-text">未设置</span></template></el-table-column>
         <el-table-column label="关联接口" min-width="160" show-overflow-tooltip><template #default="{ row }">{{ row.reference_interface_name || '-' }}</template></el-table-column>
-        <el-table-column label="任务可执行" width="105"><template #default="{ row }"><el-switch v-model="row.can_execute_in_task" @change="toggleExecutable(row)" /></template></el-table-column>
+        <el-table-column label="任务可执行" width="105"><template #default="{ row }"><el-switch v-model="row.can_execute_in_task" :disabled="!hasPermission('automation.edit')" @change="toggleExecutable(row)" /></template></el-table-column>
         <el-table-column label="更新时间" min-width="150"><template #default="{ row }">{{ formatTime(row.updated_at) }}</template></el-table-column>
-        <el-table-column label="操作" width="170" fixed="right"><template #default="{ row }"><el-button size="small" plain type="primary" @click="openForm(row)">编辑</el-button><el-button size="small" plain type="danger" @click="remove(row)">删除</el-button></template></el-table-column>
+        <el-table-column label="操作" width="170" fixed="right"><template #default="{ row }"><el-button v-if="hasPermission('automation.edit')" size="small" plain type="primary" @click="openForm(row)">编辑</el-button><el-button v-if="hasPermission('automation.delete')" size="small" plain type="danger" @click="remove(row)">删除</el-button></template></el-table-column>
       </el-table>
       <el-pagination v-model:current-page="query.page" v-model:page-size="query.pageSize" :page-sizes="pageSizes" :total="total" layout="total, sizes, prev, pager, next" @current-change="load" @size-change="changePageSize" />
     </section>
@@ -38,7 +38,7 @@
         <el-form-item label="请求参数模式"><el-radio-group v-model="form.request_parameter_mode" @change="changeRequestParameterMode"><el-radio-button label="template">模板参数化</el-radio-button><el-radio-button label="full">全参数化</el-radio-button></el-radio-group></el-form-item>
         <template v-if="form.request_parameter_mode === 'template'">
           <el-form-item label="请求参数" prop="requestParamsText"><el-input v-model="form.requestParamsText" type="textarea" :rows="5" placeholder='{"body":{"name":"{{personName}}","phone":"{{mobile}}"}}' /><small class="extract-help">参数化值支持 &#123;&#123;变量名&#125;&#125; 或 ${变量名}；关联接口变量优先使用已提取值。</small></el-form-item>
-          <el-form-item label="参数化配置"><div class="extract-rule-list"><div v-for="(item, index) in form.parameterizations" :key="index" class="template-parameter-row"><el-input v-model="item.name" placeholder="变量名，如 personName" /><el-select v-model="item.type" placeholder="数据类型" style="width:150px"><el-option v-for="itemType in parameterTypes" :key="itemType.value" :label="itemType.label" :value="itemType.value"/></el-select><el-input v-if="item.type === 'custom'" v-model="item.value" placeholder="自定义值" /><el-button link type="primary" @click="addParameterizationToQuery(index)">写入 Query</el-button><el-button type="danger" link @click="removeParameterization(index)">删除</el-button></div><el-button type="primary" link @click="addParameterization">+ 添加参数化配置</el-button></div></el-form-item>
+          <el-form-item label="参数化配置"><div class="extract-rule-list"><div v-for="(item, index) in form.parameterizations" :key="index" class="template-parameter-row"><el-input v-model="item.name" placeholder="变量名，如 personName" /><el-select v-model="item.type" placeholder="数据类型" style="width:150px" @change="changeParameterType(item)"><el-option v-for="itemType in parameterTypes" :key="itemType.value" :label="itemType.label" :value="itemType.value"/></el-select><el-input v-if="item.type === 'custom'" v-model="item.value" placeholder="自定义值" /><div v-else-if="item.type === 'time'" class="time-parameter-controls"><el-select v-model="item.time_format" placeholder="时间格式"><el-option v-for="format in timeFormats" :key="format.value" :label="format.label" :value="format.value"/></el-select><el-input-number v-model="item.time_offset" :min="-3650" :max="3650" controls-position="right" placeholder="加减天数"/></div><span v-else></span><el-button link type="primary" @click="addParameterizationToQuery(index)">写入 Query</el-button><el-button type="danger" link @click="removeParameterization(index)">删除</el-button></div><el-button type="primary" link @click="addParameterization">+ 添加参数化配置</el-button></div></el-form-item>
         </template>
         <el-form-item v-else label="全参数化配置">
           <div class="full-parameter-list">
@@ -58,10 +58,14 @@
               <div class="full-parameter-value">
                 <el-input v-if="item.value_mode === 'fixed'" v-model="item.valueText" placeholder='JSON 数组，如 ["张三","李四",1]' />
                 <template v-else>
-                  <el-select v-model="item.variable_type" style="width:130px">
+                  <el-select v-model="item.variable_type" style="width:130px" @change="changeFullParameterType(item)">
                     <el-option v-for="itemType in parameterTypes" :key="itemType.value" :label="itemType.label" :value="itemType.value" />
                   </el-select>
                   <el-input v-if="item.variable_type === 'custom'" v-model="item.valueText" placeholder="如 ${bit[0].uid}、${bit[0,2].uid}、${bit[*].uid}" />
+                  <template v-else-if="item.variable_type === 'time'">
+                    <el-select v-model="item.time_format" style="width:120px"><el-option v-for="format in timeFormats" :key="format.value" :label="format.label" :value="format.value"/></el-select>
+                    <el-input-number v-model="item.time_offset" :min="-3650" :max="3650" controls-position="right" placeholder="加减天数"/>
+                  </template>
                 </template>
               </div>
               <el-button type="danger" link @click="removeFullParameterization(index)">删除</el-button>
@@ -92,14 +96,16 @@ import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'elem
 import dayjs from 'dayjs'
 import * as api from '@/api'
 import { BUSINESS_MODULES } from '@/constants'
+import { hasPermission } from '@/auth'
 import { installOverflowTooltip } from '@/overflowTooltip'
 import { Plus, Upload } from '@element-plus/icons-vue'
-import type { ApiFullParameterization, ApiInterface, ApiParameterType, ApiParameterization, ApiResponseExtract } from '@/types'
+import type { ApiFullParameterization, ApiInterface, ApiParameterType, ApiParameterization, ApiResponseExtract, ApiTimeFormat } from '@/types'
 
 const defaultHeaders = { 'Content-Type': 'application/json; charset=utf-8', authorization: '' }
 const defaultAssertions = { status_code: 200, timeout_seconds: 3, json_path: 'code', expected_value: 0 }
 const methods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']
 const parameterTypes:{label:string;value:ApiParameterType}[]=[{label:'人名',value:'name'},{label:'时间',value:'time'},{label:'地点',value:'location'},{label:'手机号',value:'phone'},{label:'身份证',value:'id_card'},{label:'邮箱',value:'email'},{label:'自定义',value:'custom'}]
+const timeFormats:{label:string;value:ApiTimeFormat}[]=[{label:'时间戳',value:'timestamp'},{label:'年月日时分秒',value:'datetime'},{label:'年月日',value:'date'},{label:'年月',value:'year_month'},{label:'月日',value:'month_day'},{label:'年份',value:'year'}]
 const pageSizes = [10, 50, 100]
 const interfaces = ref<ApiInterface[]>([])
 const referenceInterfaces = ref<ApiInterface[]>([])
@@ -113,7 +119,7 @@ const batchModule = ref('')
 const dialog = ref(false)
 const formRef = ref<FormInstance>()
 const query = reactive({ keyword: '', module_name: [] as string[], page: 1, pageSize: 10 })
-type FullParameterizationForm={path:string;value_mode:'fixed'|'variable';valueText:string;variable_type:ApiParameterType;is_manual:boolean}
+type FullParameterizationForm={path:string;value_mode:'fixed'|'variable';valueText:string;variable_type:ApiParameterType;time_format:ApiTimeFormat;time_offset:number;is_manual:boolean}
 const form = reactive({ id: 0, name: '', method: 'GET', path: '', module_name: '', api_type: '系统录入', description: '', headersText: JSON.stringify(defaultHeaders, null, 2), requestParamsText: '', parameterizations: [] as ApiParameterization[], request_parameter_mode:'template' as 'template'|'full', full_parameterizations:[] as FullParameterizationForm[], assertionsText: JSON.stringify(defaultAssertions, null, 2), reference_enabled: false, reference_interface: null as number | null, response_extracts: [] as ApiResponseExtract[], can_execute_in_task: true })
 
 function applyModuleTokenHeader() {
@@ -148,6 +154,8 @@ function addExtract() { form.response_extracts.push({ name: '', path: '' }) }
 function removeExtract(index: number) { form.response_extracts.splice(index, 1) }
 function addParameterization() { form.parameterizations.push({ name: '', type: 'name' }) }
 function removeParameterization(index: number) { form.parameterizations.splice(index, 1) }
+function changeParameterType(item:ApiParameterization){if(item.type==='time'){item.time_format=item.time_format||'date';item.time_offset=Number(item.time_offset||0)}else{delete item.time_format;delete item.time_offset}}
+function changeFullParameterType(item:FullParameterizationForm){if(item.variable_type==='time'){item.time_format=item.time_format||'date';item.time_offset=Number(item.time_offset||0)}else{item.time_format='date';item.time_offset=0}}
 function addParameterizationToQuery(index:number){
   const parameter=form.parameterizations[index],name=parameter?.name.trim()
   if(!name||!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)){ElMessage.error('请先填写合法的变量名');return}
@@ -167,7 +175,7 @@ function collectParameterPaths(value:unknown,prefix:string,paths:string[]){
   }
   paths.push(prefix)
 }
-function addFullParameterization(){form.full_parameterizations.push({path:`${form.method==='GET'?'query':'body'}.`,value_mode:'fixed',valueText:'[]',variable_type:'name',is_manual:true})}
+function addFullParameterization(){form.full_parameterizations.push({path:`${form.method==='GET'?'query':'body'}.`,value_mode:'fixed',valueText:'[]',variable_type:'name',time_format:'date',time_offset:0,is_manual:true})}
 function removeFullParameterization(index:number){form.full_parameterizations.splice(index,1)}
 function syncFullParameterizationsFromRequest(showError=true){
   const fail=(message:string)=>{if(showError)ElMessage.error(message);return false}
@@ -186,7 +194,7 @@ function syncFullParameterizationsFromRequest(showError=true){
     const validPaths=paths.filter(path=>/^(?:query|body)\.(?:[A-Za-z_][A-Za-z0-9_]*|\d+)(?:\.(?:[A-Za-z_][A-Za-z0-9_]*|\d+))*$/.test(path))
     if(!validPaths.length)return fail('请求参数中没有可配置的参数 key')
     const existing=new Map(form.full_parameterizations.map(item=>[item.path,item]))
-    form.full_parameterizations=validPaths.map(path=>existing.get(path)||{path,value_mode:'fixed',valueText:'[]',variable_type:'name',is_manual:false})
+    form.full_parameterizations=validPaths.map(path=>existing.get(path)||{path,value_mode:'fixed',valueText:'[]',variable_type:'name',time_format:'date',time_offset:0,is_manual:false})
     return true
   }catch{return fail('请求参数 JSON 格式不正确')}
 }
@@ -220,6 +228,8 @@ function serializeFullParameterizations():ApiFullParameterization[]|null{
       if(item.variable_type==='custom'){
         if(!validateCustomValueText(path,item.valueText))return null
         result.push({path,value_mode:'variable',variable_type:item.variable_type,value:item.valueText.trim()})
+      }else if(item.variable_type==='time'){
+        result.push({path,value_mode:'variable',variable_type:item.variable_type,time_format:item.time_format||'date',time_offset:Number(item.time_offset||0)})
       }else{
         result.push({path,value_mode:'variable',variable_type:item.variable_type})
       }
@@ -229,6 +239,7 @@ function serializeFullParameterizations():ApiFullParameterization[]|null{
   return result
 }
 function openForm(item?: ApiInterface) {
+  if (item ? !hasPermission('automation.edit') : !hasPermission('automation.create')) return
   Object.assign(
     form,
     item ? {
@@ -241,13 +252,15 @@ function openForm(item?: ApiInterface) {
       description: item.description,
       headersText: JSON.stringify(item.headers || {}, null, 2),
       requestParamsText: Object.keys(item.request_params || {}).length ? JSON.stringify(item.request_params, null, 2) : '',
-      parameterizations: (item.parameterizations || []).map(rule => ({ ...rule })),
+      parameterizations: (item.parameterizations || []).map(rule => ({ ...rule, ...(rule.type === 'time' ? { time_format: rule.time_format || 'date', time_offset: Number(rule.time_offset || 0) } : {}) })),
       request_parameter_mode: item.request_parameter_mode || 'template',
       full_parameterizations: (item.full_parameterizations || []).map(rule => ({
         path: rule.path,
         value_mode: rule.value_mode,
         valueText: rule.value_mode === 'fixed' ? JSON.stringify(rule.values ?? (Object.prototype.hasOwnProperty.call(rule, 'value') ? [rule.value] : [])) : String(rule.value ?? ''),
         variable_type: rule.variable_type || 'name',
+        time_format: rule.time_format || 'date',
+        time_offset: Number(rule.time_offset || 0),
         is_manual: true,
       })),
       assertionsText: JSON.stringify(Object.keys(item.assertions || {}).length ? item.assertions : defaultAssertions, null, 2),
@@ -279,6 +292,7 @@ function openForm(item?: ApiInterface) {
   void loadReferenceInterfaces()
 }
 async function save() {
+  if (form.id ? !hasPermission('automation.edit') : !hasPermission('automation.create')) return
   if (!await formRef.value?.validate().catch(() => false)) return
   const fullParameterizations=form.request_parameter_mode==='full'?serializeFullParameterizations():[]
   if(form.request_parameter_mode==='full'&&!fullParameterizations)return
@@ -293,6 +307,7 @@ async function save() {
   } catch (e) { ElMessage.error((e as Error).message) } finally { saving.value = false }
 }
 async function batchImport() {
+  if (!hasPermission('automation.create')) return
   const text = batchText.value.trim()
   if (!text) return
   batchSaving.value = true
@@ -308,8 +323,8 @@ async function batchImport() {
     ElMessage.success(`批量录入完成：成功 ${result.imported.length} 条，重复跳过 ${skipped} 条${failed ? `，失败 ${failed} 条` : ''}`)
   } catch (e) { ElMessage.error((e as Error).message) } finally { batchSaving.value = false }
 }
-async function toggleExecutable(item: ApiInterface) { try { await api.updateInterface(item.id, { can_execute_in_task: item.can_execute_in_task }); ElMessage.success(item.can_execute_in_task ? '已允许任务执行' : '已禁止任务执行') } catch (e) { item.can_execute_in_task = !item.can_execute_in_task; ElMessage.error((e as Error).message) } }
-async function remove(item: ApiInterface) { try { await ElMessageBox.confirm(`确定删除接口“${item.name}”吗？`, '删除接口', { type: 'warning' }); await api.deleteInterface(item.id); await load(); ElMessage.success('接口已删除') } catch (e) { if (e !== 'cancel') ElMessage.error((e as Error).message) } }
+async function toggleExecutable(item: ApiInterface) { if (!hasPermission('automation.edit')) return; try { await api.updateInterface(item.id, { can_execute_in_task: item.can_execute_in_task }); ElMessage.success(item.can_execute_in_task ? '已允许任务执行' : '已禁止任务执行') } catch (e) { item.can_execute_in_task = !item.can_execute_in_task; ElMessage.error((e as Error).message) } }
+async function remove(item: ApiInterface) { if (!hasPermission('automation.delete')) return; try { await ElMessageBox.confirm(`确定删除接口“${item.name}”吗？`, '删除接口', { type: 'warning' }); await api.deleteInterface(item.id); await load(); ElMessage.success('接口已删除') } catch (e) { if (e !== 'cancel') ElMessage.error((e as Error).message) } }
 function methodType(value: string) { return value === 'GET' ? 'success' : value === 'POST' ? 'primary' : value === 'DELETE' ? 'danger' : 'warning' }
 function formatTime(value: string) { return dayjs(value).format('YYYY-MM-DD HH:mm') }
 let removeOverflowTooltip = () => {}
@@ -321,12 +336,16 @@ onUnmounted(() => removeOverflowTooltip())
 .muted-text { color: #98a2b3; font-size: 12px; }
 .extract-rule-list { width: 100%; display: grid; gap: 8px; }
 .extract-rule-row { display: grid; grid-template-columns: 1fr 1.5fr auto; gap: 8px; align-items: center; }
-.template-parameter-row { display: grid; grid-template-columns: minmax(160px, 1fr) 150px minmax(130px, 1fr) auto auto; gap: 8px; align-items: center; }
+.template-parameter-row { display: grid; grid-template-columns: minmax(160px, 1fr) 150px minmax(220px, 1.2fr) auto auto; gap: 8px; align-items: center; }
+.time-parameter-controls { display: flex; gap: 8px; min-width: 0; }
+.time-parameter-controls .el-select { flex: 1; min-width: 110px; }
+.time-parameter-controls .el-input-number { width: 120px; }
 .full-parameter-list { width: 100%; display: grid; gap: 8px; }
 .full-parameter-actions { display: flex; align-items: center; justify-content: space-between; min-height: 32px; }
 .full-parameter-row { display: grid; grid-template-columns: minmax(180px, 1fr) 118px minmax(330px, 1.2fr) auto; gap: 8px; align-items: center; }
 .full-parameter-value { display: flex; gap: 8px; min-width: 0; }
 .full-parameter-value > .el-input { flex: 1; min-width: 120px; }
+.full-parameter-value .el-input-number { width: 120px; }
 .extract-help { display: block; margin-top: 5px; color: #98a2b3; font-size: 12px; line-height: 1.5; }
 @media (max-width: 640px) { .template-parameter-row, .full-parameter-row { grid-template-columns: 1fr 118px; } }
 </style>
