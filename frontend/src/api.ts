@@ -16,7 +16,7 @@ export const getMyEnvironmentAccounts = () => request.get<never,ApiResponse<Envi
 export const saveMyEnvironmentAccounts = (accounts:{environment_id:number;account:string}[]) => request.put<never,ApiResponse<EnvironmentAccountSettings>>('/me/environment-accounts/', {accounts})
 export const getDashboard = () => request.get<never,ApiResponse<DashboardStats>>('/dashboard/')
 export const executeAccountBalance = (data:{environment:number;email:string;amount:number}) => request.post<never,ApiResponse<AccountBalanceResult>>('/data-factory/account-balance/',data)
-export const executeAccountAdd = (data:{frontend_environment:number;backend_environment:number;email:string;amount:number|null;quantity:number}) => request.post<never,ApiResponse<AccountAddResult>>('/data-factory/account-add/',data)
+export const executeAccountAdd = (data:{frontend_environment:number;backend_environment:number;email:string;amount:number|null;quantity:number;referral_code?:string}) => request.post<never,ApiResponse<AccountAddResult>>('/data-factory/account-add/',data)
 export const activateMemberStatus = (data:{environment:number;member_id:string}) => request.post<never,ApiResponse<MemberStatusActivateResult>>('/data-factory/member-status-activate/',data)
 export const queryMemberInfo = (data:{environment:number;email:string}) => request.post<never,ApiResponse<MemberQueryResult>>('/data-factory/member-query/',data)
 export const pushOrderResult = (data:Record<string,string|number>) => request.post<never,ApiResponse<OrderResultPushResult>>('/data-factory/order-result-push/',data)

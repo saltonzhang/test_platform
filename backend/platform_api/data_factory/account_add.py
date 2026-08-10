@@ -453,8 +453,9 @@ def _build_account_add_result(frontend_environment, backend_environment, email, 
     }
 
 
-def _run_single_account(frontend_environment, backend_environment, email='', amount=5000, max_retries=60):
+def _run_single_account(frontend_environment, backend_environment, email='', amount=5000, max_retries=60, referral_code=''):
     email_clean = str(email or '').strip().lower()
+    referral_code_clean = str(referral_code or '').strip()
     amount_value = _normalize_account_add_amount(amount)
     base_url = getattr(frontend_environment, 'base_url', '')
     login_url = getattr(backend_environment, 'login_url', '')
@@ -523,7 +524,7 @@ def _run_single_account(frontend_environment, backend_environment, email='', amo
                 'telAreaCode': '55',
                 'invitationCode': '',
                 'sourceUrl': 'https://matchday.helix.city/en',
-                'referralCode': '',
+                'referralCode': referral_code_clean,
             }
 
             response = requests.post(register_url, headers=headers, json=payload, timeout=10)
@@ -596,7 +597,7 @@ def _run_single_account(frontend_environment, backend_environment, email='', amo
     raise DataFactoryError('注册与认证流程执行失败')
 
 
-def run_full_automation(frontend_environment, backend_environment, email='', amount=5000, max_retries=60, quantity=1):
+def run_full_automation(frontend_environment, backend_environment, email='', amount=5000, max_retries=60, quantity=1, referral_code=''):
     """按数量注册账号；每个账号内部仍使用 max_retries 重试注册流程。"""
     try:
         account_count = int(quantity)
@@ -617,6 +618,7 @@ def run_full_automation(frontend_environment, backend_environment, email='', amo
                 email=email,
                 amount=amount,
                 max_retries=max_retries,
+                referral_code=referral_code,
             )
         )
 
@@ -631,7 +633,7 @@ def run_full_automation(frontend_environment, backend_environment, email='', amo
     return result
 
 
-def execute_account_add(frontend_environment_id, backend_environment_id, email, amount, quantity):
+def execute_account_add(frontend_environment_id, backend_environment_id, email, amount, quantity, referral_code=''):
     amount_value = _normalize_account_add_amount(amount)
     frontend_environment = Environment.objects.filter(pk=frontend_environment_id).first()
     if not frontend_environment:
@@ -655,6 +657,7 @@ def execute_account_add(frontend_environment_id, backend_environment_id, email, 
         email=email,
         amount=amount_value,
         quantity=account_count,
+        referral_code=referral_code,
     )
     return {
         'environment_name': f'{frontend_environment.name} / {backend_environment.name}',

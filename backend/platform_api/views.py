@@ -386,6 +386,7 @@ class DataFactoryAccountAddView(APIView):
         if not backend_environment.login_url:
             raise ValidationError({'backend_environment': '请选择已配置后台登录地址的运行环境'})
         email = str(request.data.get('email', '')).strip().lower()
+        referral_code = str(request.data.get('referral_code', '')).strip()
         raw_amount = request.data.get('amount')
         if raw_amount in (None, ''):
             amount = Decimal('0')
@@ -418,6 +419,7 @@ class DataFactoryAccountAddView(APIView):
                     email,
                     amount,
                     quantity,
+                    referral_code,
                 )
                 generated_emails = [
                     str(item).strip().lower()

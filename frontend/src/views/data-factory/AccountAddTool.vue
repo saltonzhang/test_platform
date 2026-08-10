@@ -79,6 +79,10 @@
             </el-col>
           </el-row>
 
+          <el-form-item label="邀请码（可选）" prop="referral_code">
+            <el-input v-model="form.referral_code" placeholder="填写后，新账号将作为该邀请码的下级注册" />
+          </el-form-item>
+
           <el-form-item label="金额" prop="amount">
             <el-input-number
               v-model="form.amount"
@@ -156,12 +160,14 @@ const form = reactive<{
   frontend_environment: number | null
   backend_environment: number | null
   email: string
+  referral_code: string
   quantity: number
   amount: number | null
 }>({
   frontend_environment: null,
   backend_environment: null,
   email: '',
+  referral_code: '',
   quantity: 1,
   amount: null,
 })
@@ -256,6 +262,7 @@ function resetForm() {
   form.frontend_environment = null
   form.backend_environment = null
   form.email = ''
+  form.referral_code = ''
   form.quantity = 1
   form.amount = null
   resetResultPanel()
@@ -335,6 +342,7 @@ async function submit() {
       frontend_environment: frontendEnvironmentId,
       backend_environment: backendEnvironmentId,
       email: form.email,
+      referral_code: form.referral_code,
       quantity: form.quantity,
       amount: form.amount,
     })
