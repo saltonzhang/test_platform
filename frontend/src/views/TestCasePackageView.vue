@@ -1,0 +1,23 @@
+<template>
+  <section class="page-panel testcase-page">
+    <div class="section-head bordered"><div><h3>用例包</h3><p>维护测试用例思维导图，支持本地 XMind 文件导入。</p></div><div class="actions"><el-upload :show-file-list="false" accept=".xmind" :http-request="uploadXMind"><el-button v-if="hasPermission('testcase.package.create')"><el-icon><Upload /></el-icon>导入 XMind</el-button></el-upload><el-button v-if="hasPermission('testcase.package.create')" type="primary" @click="createAndEdit"><el-icon><Plus /></el-icon>新建用例包</el-button></div></div>
+    <div class="query-bar"><el-input v-model="query.keyword" clearable placeholder="搜索用例包名称或说明" @keyup.enter="search" @clear="search"><template #prefix><el-icon><Search /></el-icon></template></el-input><el-button @click="search">查询</el-button></div>
+    <el-table v-loading="loading" :data="packages" empty-text="暂无用例包"><el-table-column prop="requirement_name" label="需求名称" min-width="220" show-overflow-tooltip/><el-table-column prop="name" label="用例包名称" min-width="220" show-overflow-tooltip/><el-table-column label="是否锁定" width="100"><template #default="{row}"><el-tag :type="row.is_locked?'warning':'success'">{{ row.is_locked?'是':'否' }}</el-tag></template></el-table-column><el-table-column prop="created_by_name" label="创建人" min-width="100"/><el-table-column prop="created_at" label="创建时间" min-width="170"><template #default="{row}">{{ format(row.created_at) }}</template></el-table-column><el-table-column label="操作" width="210" fixed="right"><template #default="{row}"><el-button v-if="hasPermission('testcase.package.edit')" link type="primary" @click="editPackage(row)">编辑</el-button><el-button link type="primary" @click="execute(row)">执行</el-button><el-button v-if="hasPermission('testcase.package.delete')" link type="danger" @click="remove(row)">删除</el-button></template></el-table-column></el-table>
+    <el-pagination v-model:current-page="query.page" v-model:page-size="query.pageSize" :page-sizes="[10,50,100]" :total="total" layout="total, sizes, prev, pager, next" @current-change="load" @size-change="changeSize"/>
+    <el-dialog v-model="previewDialog" :title="previewPackage?.name || '用例包预览'" width="680"><el-tree v-if="previewPackage" :data="[previewPackage.content]" node-key="title" default-expand-all :props="{label:'title',children:'children'}"/><el-empty v-else description="暂无内容"/></el-dialog>
+  </section>
+</template>
+<script setup lang="ts">
+import { reactive,ref } from 'vue';import { useRouter } from 'vue-router';import dayjs from 'dayjs';import { ElMessage,ElMessageBox,type UploadRequestOptions } from 'element-plus';import { hasPermission } from '@/auth';import * as api from '@/api';import type { TestCasePackage } from '@/types'
+const router=useRouter(),loading=ref(false),packages=ref<TestCasePackage[]>([]),total=ref(0),previewDialog=ref(false),previewPackage=ref<TestCasePackage|null>(null)
+const query=reactive({keyword:'',page:1,pageSize:10}),format=(value:string)=>dayjs(value).format('YYYY-MM-DD HH:mm:ss')
+async function load(){loading.value=true;try{const res=await api.getTestCasePackages(query);packages.value=res.data.list;total.value=res.data.total}catch(e){ElMessage.error((e as Error).message)}finally{loading.value=false}}
+function search(){query.page=1;void load()}function changeSize(){query.page=1;void load()}
+function createAndEdit(){void router.push('/testcase/packages/new/edit')}
+function editPackage(item:TestCasePackage){void router.push(`/testcase/packages/${item.id}/edit`)}function preview(item:TestCasePackage){previewPackage.value=item;previewDialog.value=true}
+function execute(_item:TestCasePackage){ElMessage.info('用例执行功能暂未开放')}
+async function uploadXMind(options:UploadRequestOptions){try{const res=await api.importTestCasePackageXMind(options.file as File);ElMessage.success('XMind 用例包导入成功');await load();options.onSuccess?.(res)}catch(e){const uploadError=Object.assign(e instanceof Error?e:new Error(String(e)),{status:0,method:'POST',url:''});ElMessage.error(uploadError.message);options.onError?.(uploadError)}}
+async function remove(item:TestCasePackage){try{await ElMessageBox.confirm(`确定删除用例包“${item.name}”吗？`,'删除用例包',{type:'warning'});await api.deleteTestCasePackage(item.id);if(packages.value.length===1&&query.page>1)query.page-=1;await load();ElMessage.success('用例包已删除')}catch(e){if(e!=='cancel')ElMessage.error((e as Error).message)}}
+void load()
+</script>
+<style scoped>.testcase-page{min-height:100%}.actions,.query-bar{display:flex;gap:12px;align-items:center}.query-bar{margin:18px 0}.query-bar .el-input{max-width:360px}.el-pagination{justify-content:flex-end;margin-top:18px}</style>

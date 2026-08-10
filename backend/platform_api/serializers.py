@@ -6,11 +6,13 @@ from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
 
 from .constants import BUSINESS_MODULE_NAMES
-from .models import ApiInterface, AutomationModule, AutomationTask, AutomationTaskResult, DataFactoryExecution, Environment, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorTask, Role, User
+from .models import ApiInterface, AutomationModule, AutomationTask, AutomationTaskResult, DataFactoryExecution, Environment, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorTask, Role, TestCasePackage, User
 
 ALLOWED_PERMISSIONS = {
     'home.view',
     'automation.view', 'automation.create', 'automation.run', 'automation.edit', 'automation.delete',
+    'testcase.package.view', 'testcase.package.create', 'testcase.package.edit', 'testcase.package.delete',
+    'testcase.execution.view',
     'monitor.api.view', 'monitor.api.manage',
     'monitor.task.view', 'monitor.task.manage', 'monitor.task.run',
     'monitor.alarm.view', 'monitor.alarm.handle',
@@ -20,6 +22,8 @@ ALLOWED_PERMISSIONS = {
     'data_factory.view',
     'data_factory.account_add',
     'data_factory.account_balance',
+    'data_factory.member_status_activate',
+    'data_factory.member_query',
     'data_factory.order_result_push',
     'data_factory.rollback_settlement',
     'data_factory.bet_cancel',
@@ -168,6 +172,16 @@ class DataFactoryExecutionSerializer(serializers.ModelSerializer):
     execution_content = serializers.SerializerMethodField()
 
     def get_execution_content(self, obj):
+        if obj.tool_name == '用户状态激活':
+            content = {'运行环境（预留）': obj.environment.name if obj.environment_id else '', 'Member ID': obj.member_id, '执行结果': obj.get_status_display()}
+            if obj.message:
+                content['信息'] = obj.message
+            return content
+        if obj.tool_name == '查询用户信息':
+            content = {'运行环境': obj.environment.name if obj.environment_id else '', '会员邮箱': obj.email, 'Member ID': obj.member_id, '执行结果': obj.get_status_display()}
+            if obj.message:
+                content['信息'] = obj.message
+            return content
         if obj.tool_name in {'订单结果推送', '回滚结算', '取消', '回滚取消'}:
             content = {'事件 ID': obj.email, '市场 ID': obj.adjustment_id, '消息 Key': obj.member_id, '执行结果': obj.get_status_display()}
             if obj.message:
@@ -483,6 +497,9 @@ class AutomationTaskSerializer(serializers.ModelSerializer):
     execution_details = AutomationTaskResultSerializer(many=True, read_only=True)
     interface_count = serializers.SerializerMethodField()
     failure_count = serializers.SerializerMethodField()
+    # Automation passwords are used only for the create-and-run request. They
+    # are deliberately accepted as write-only input and never persisted.
+    login_password = serializers.CharField(write_only=True, required=False, allow_blank=True, trim_whitespace=False)
 
     def get_modules(self, obj):
         return list(obj.modules.all())
@@ -527,11 +544,13 @@ class AutomationTaskSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = AutomationTask
-        fields = ['id', 'name', 'module', 'module_ids', 'interface_ids', 'module_names', 'app', 'app_name', 'module_name', 'task_type', 'task_type_name', 'environment', 'environment_name', 'status', 'status_name', 'schedule', 'owner', 'owner_name', 'notification_status', 'notification_message', 'notified_at', 'interface_count', 'failure_count', 'execution_details', 'created_at', 'updated_at']
+        fields = ['id', 'name', 'module', 'module_ids', 'interface_ids', 'module_names', 'app', 'app_name', 'module_name', 'task_type', 'task_type_name', 'environment', 'environment_name', 'status', 'status_name', 'schedule', 'owner', 'owner_name', 'notification_status', 'notification_message', 'notified_at', 'interface_count', 'failure_count', 'execution_details', 'login_password', 'created_at', 'updated_at']
         read_only_fields = ['id', 'module_names', 'app', 'app_name', 'module_name', 'environment_name', 'owner_name', 'task_type_name', 'status_name', 'notification_status', 'notification_message', 'notified_at', 'interface_count', 'failure_count', 'execution_details', 'created_at', 'updated_at']
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
+        if self.instance and str(attrs.get('login_password', '') or '').strip():
+            raise serializers.ValidationError({'login_password': '自动化任务密码仅在新建时使用，不能修改或保存'})
         task_type = attrs.get('task_type', self.instance.task_type if self.instance else '')
         interfaces = attrs.get('interfaces')
         if task_type == 'scenario':
@@ -573,6 +592,9 @@ class AutomationTaskSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
+        # The view passes this value to the one-time create execution. Keep it
+        # out of the AutomationTask row entirely.
+        validated_data.pop('login_password', None)
         modules = validated_data.pop('_modules', validated_data.pop('modules', []))
         interfaces = validated_data.pop('_interfaces', validated_data.pop('interfaces', []))
         validated_data.pop('modules', None)
@@ -584,6 +606,7 @@ class AutomationTaskSerializer(serializers.ModelSerializer):
         return task
 
     def update(self, instance, validated_data):
+        validated_data.pop('login_password', None)
         modules = validated_data.pop('_modules', None)
         interfaces = validated_data.pop('_interfaces', None)
         validated_data.pop('modules', None)
@@ -635,10 +658,12 @@ class MonitorTaskSerializer(serializers.ModelSerializer):
     api_count = serializers.SerializerMethodField()
     failure_count = serializers.SerializerMethodField()
     latest_execution = serializers.SerializerMethodField()
+    login_password = serializers.CharField(write_only=True, required=False, allow_blank=True, trim_whitespace=False)
+    password_configured = serializers.SerializerMethodField()
 
     class Meta:
         model = MonitorTask
-        fields = ['id', 'name', 'module_name', 'api_type', 'environment', 'environment_name', 'api_config_ids', 'automation_interface_ids', 'api_count', 'interval_value', 'interval_unit', 'interval_unit_name', 'enabled', 'status', 'status_name', 'failure_count', 'latest_execution', 'notification', 'last_run_time', 'next_run_time', 'created_by', 'created_by_name', 'created_at', 'updated_at']
+        fields = ['id', 'name', 'module_name', 'api_type', 'environment', 'environment_name', 'api_config_ids', 'automation_interface_ids', 'api_count', 'interval_value', 'interval_unit', 'interval_unit_name', 'enabled', 'status', 'status_name', 'failure_count', 'latest_execution', 'notification', 'login_password', 'password_configured', 'last_run_time', 'next_run_time', 'created_by', 'created_by_name', 'created_at', 'updated_at']
         read_only_fields = ['id', 'environment_name', 'api_count', 'status', 'status_name', 'failure_count', 'latest_execution', 'last_run_time', 'next_run_time', 'created_by', 'created_by_name', 'created_at', 'updated_at']
 
     def get_api_count(self, obj):
@@ -653,10 +678,38 @@ class MonitorTaskSerializer(serializers.ModelSerializer):
         latest = obj.executions.order_by('-started_at').first()
         return MonitorExecutionSerializer(latest).data if latest else None
 
+    def get_password_configured(self, obj):
+        return bool(obj.get_login_password())
+
+    def create(self, validated_data):
+        login_password = validated_data.pop('login_password', '')
+        task = super().create(validated_data)
+        if login_password:
+            task.set_login_password(login_password)
+            task.save(update_fields=['login_password_encrypted', 'updated_at'])
+        return task
+
+    def update(self, instance, validated_data):
+        login_password = validated_data.pop('login_password', '')
+        task = super().update(instance, validated_data)
+        if login_password:
+            task.set_login_password(login_password)
+            task.save(update_fields=['login_password_encrypted', 'updated_at'])
+        return task
+
     def _resolve_interfaces(self, api_type):
-        api_type = (api_type or '').strip()
-        monitor_interfaces = list(MonitorApiConfig.objects.filter(api_type=api_type, enabled=True)) if api_type else []
-        automation_interfaces = list(ApiInterface.objects.filter(api_type=api_type, can_execute_in_task=True)) if api_type else []
+        interface_name = (api_type or '').strip()
+        if not interface_name:
+            return [], []
+
+        # New monitor tasks store the selected interface name in the legacy
+        # api_type column. Keep the old api_type lookup as a fallback so
+        # existing tasks continue to resolve their grouped interfaces.
+        monitor_interfaces = list(MonitorApiConfig.objects.filter(name=interface_name, enabled=True))
+        automation_interfaces = list(ApiInterface.objects.filter(name=interface_name, can_execute_in_task=True))
+        if not monitor_interfaces and not automation_interfaces:
+            monitor_interfaces = list(MonitorApiConfig.objects.filter(api_type=interface_name, enabled=True))
+            automation_interfaces = list(ApiInterface.objects.filter(api_type=interface_name, can_execute_in_task=True))
         return monitor_interfaces, automation_interfaces
 
     def validate_interval_value(self, value):
@@ -673,7 +726,7 @@ class MonitorTaskSerializer(serializers.ModelSerializer):
             attrs['api_configs'] = api_configs
             attrs['automation_interfaces'] = automation_interfaces
         if not api_configs and not automation_interfaces:
-            raise serializers.ValidationError({'api_type': '该接口类型下暂无可执行接口'})
+            raise serializers.ValidationError({'api_type': '该接口名称下暂无可执行接口'})
         return attrs
 
 
@@ -688,3 +741,22 @@ class MonitorAlarmSerializer(serializers.ModelSerializer):
         model = MonitorAlarm
         fields = ['id', 'task', 'task_name', 'execution', 'detail', 'interface_name', 'level', 'level_name', 'status', 'status_name', 'message', 'handled_by', 'handled_by_name', 'handled_at', 'created_at', 'updated_at']
         read_only_fields = ['id', 'task', 'task_name', 'execution', 'detail', 'interface_name', 'level', 'level_name', 'handled_by', 'handled_by_name', 'handled_at', 'created_at', 'updated_at']
+
+
+class TestCasePackageSerializer(serializers.ModelSerializer):
+    created_by_name = serializers.CharField(source='created_by.display_name', read_only=True)
+    requirement_name = serializers.SerializerMethodField()
+
+    def get_requirement_name(self, obj):
+        content = obj.content if isinstance(obj.content, dict) else {}
+        return str(content.get('title') or '未命名需求')
+
+    class Meta:
+        model = TestCasePackage
+        fields = ['id', 'name', 'description', 'content', 'requirement_name', 'is_locked', 'created_by_name', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_by_name', 'created_at', 'updated_at']
+
+    def validate_content(self, value):
+        if not isinstance(value, dict):
+            raise serializers.ValidationError('用例内容必须是对象')
+        return value

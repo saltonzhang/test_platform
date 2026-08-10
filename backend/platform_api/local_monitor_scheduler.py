@@ -48,7 +48,7 @@ def _run_task(task_id):
         return
     try:
         task = MonitorTask.objects.select_related('environment').prefetch_related('api_configs').get(pk=task_id, enabled=True)
-        execute_monitor_task(task)
+        execute_monitor_task(task, task.created_by, '')
     except Exception:
         pass
     finally:

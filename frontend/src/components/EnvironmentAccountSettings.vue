@@ -21,6 +21,11 @@
 
       <el-empty v-if="!loading && !accounts.length" description="暂无已添加环境" />
       <el-form v-else label-position="top" class="environment-account-list">
+        <div class="environment-account-column-head">
+          <span>环境</span>
+          <span>环境账号</span>
+          <span aria-hidden="true"></span>
+        </div>
         <div v-for="item in accounts" :key="item.environment_id" class="environment-account-row">
           <span class="environment-account-name" :title="item.environment_name">{{ item.environment_name }}</span>
           <el-form-item class="environment-account-input">
@@ -139,6 +144,7 @@ async function save() {
 .environment-account-add { display: flex; gap: 12px; margin-bottom: 20px; }
 .environment-account-add :deep(.el-select) { flex: 1; min-width: 0; }
 .environment-account-list { border-top: 1px solid #eaecf0; }
+.environment-account-column-head { display: grid; grid-template-columns: minmax(120px, 0.45fr) minmax(0, 1fr) 32px; column-gap: 16px; color: #667085; font-size: 13px; font-weight: 600; padding: 11px 4px; }
 .environment-account-row { display: grid; grid-template-columns: minmax(120px, 0.45fr) minmax(0, 1fr) 32px; align-items: center; column-gap: 16px; border-bottom: 1px solid #eaecf0; padding: 12px 4px; }
 .environment-account-row:last-child { border-bottom: 0; }
 .environment-account-name { overflow: hidden; color: #344054; font-weight: 600; line-height: 32px; text-overflow: ellipsis; white-space: nowrap; }
@@ -146,6 +152,7 @@ async function save() {
 
 @media (max-width: 560px) {
   .environment-account-add { align-items: stretch; flex-direction: column; }
+  .environment-account-column-head { grid-template-columns: minmax(88px, 0.4fr) minmax(0, 1fr) 32px; column-gap: 8px; }
   .environment-account-row { grid-template-columns: minmax(88px, 0.4fr) minmax(0, 1fr) 32px; column-gap: 8px; }
 }
 </style>

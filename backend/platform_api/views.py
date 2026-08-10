@@ -25,7 +25,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from .constants import BUSINESS_MODULE_NAMES
-from .data_factory import DataFactoryError, bet_cancel, execute_account_add, execute_account_balance, push_order_result, rollback_bet_cancel, rollback_bet_settlement
+from .data_factory import DataFactoryError, activate_member_status, bet_cancel, execute_account_add, execute_account_balance, push_order_result, query_member_by_email, rollback_bet_cancel, rollback_bet_settlement
 from .interface_import import InterfaceImportError, parse_fetch_text
 from .models import ApiInterface, AutomationModule, AutomationTask, AutomationTaskResult, DataFactoryExecution, Environment, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorTask, Role, User, UserEnvironmentAccount
 from .pagination import StandardPagination
@@ -462,6 +462,76 @@ class DataFactoryAccountAddView(APIView):
         )
 
 
+class DataFactoryMemberQueryView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        require_data_factory_member_query_permission(request)
+        email = str(request.data.get('email', '')).strip().lower()
+        if not email or '@' not in email:
+            raise ValidationError({'email': '请输入有效邮箱'})
+        environment_id = request.data.get('environment')
+        environment = Environment.objects.filter(pk=environment_id).first()
+        if not environment:
+            raise ValidationError({'environment': '请选择有效运行环境'})
+        execution = DataFactoryExecution.objects.create(
+            tool_name='查询用户信息', operator=request.user, environment=environment, email=email, amount=0,
+        )
+        try:
+            result = query_member_by_email(email, environment_name=environment.name)
+        except DataFactoryError as exc:
+            execution.status = 'failed'
+            execution.message = str(exc)
+            execution.save(update_fields=['status', 'message', 'updated_at'])
+            raise ValidationError(str(exc)) from exc
+        except Exception as exc:
+            execution.status = 'failed'
+            execution.message = str(exc)
+            execution.save(update_fields=['status', 'message', 'updated_at'])
+            raise ValidationError(f'查询用户信息异常：{exc}') from exc
+        execution.status = 'passed'
+        execution.member_id = result['member_id']
+        execution.message = f"UID={result['uid']}；CPF={result['cpf']}；昵称={result['nickname']}"
+        execution.save(update_fields=['status', 'member_id', 'message', 'updated_at'])
+        return success(result, '查询用户信息成功')
+
+
+class DataFactoryMemberStatusActivateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        require_data_factory_member_status_activate_permission(request)
+        member_id = str(request.data.get('member_id', '')).strip()
+        if not member_id:
+            raise ValidationError({'member_id': '请输入 member_id'})
+        if not member_id.isdigit():
+            raise ValidationError({'member_id': 'member_id 必须是数字'})
+        environment_id = request.data.get('environment')
+        environment = Environment.objects.filter(pk=environment_id).first()
+        if not environment:
+            raise ValidationError({'environment': '请选择有效运行环境'})
+        execution = DataFactoryExecution.objects.create(
+            tool_name='用户状态激活', operator=request.user, environment=environment, email='',
+            amount=0, member_id=member_id,
+        )
+        try:
+            result = activate_member_status(member_id, environment_name=environment.name)
+        except DataFactoryError as exc:
+            execution.status = 'failed'
+            execution.message = str(exc)
+            execution.save(update_fields=['status', 'message', 'updated_at'])
+            raise ValidationError(str(exc)) from exc
+        except Exception as exc:
+            execution.status = 'failed'
+            execution.message = str(exc)
+            execution.save(update_fields=['status', 'message', 'updated_at'])
+            raise ValidationError(f'用户状态激活异常：{exc}') from exc
+        execution.status = 'passed'
+        execution.message = result['message']
+        execution.save(update_fields=['status', 'message', 'updated_at'])
+        return success(result, '用户状态激活成功')
+
+
 class DataFactoryOrderResultPushView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -656,6 +726,18 @@ def require_data_factory_account_add_permission(request):
         raise PermissionDenied('当前账号没有账户添加工具权限')
 
 
+def require_data_factory_member_status_activate_permission(request):
+    permissions = request.user.role.permissions if isinstance(request.user.role.permissions, list) else []
+    if not (request.user.is_superuser or request.user.role.code == 'admin' or 'data_factory.member_status_activate' in permissions):
+        raise PermissionDenied('当前账号没有用户状态激活工具权限')
+
+
+def require_data_factory_member_query_permission(request):
+    permissions = request.user.role.permissions if isinstance(request.user.role.permissions, list) else []
+    if not (request.user.is_superuser or request.user.role.code == 'admin' or 'data_factory.member_query' in permissions):
+        raise PermissionDenied('当前账号没有查询用户信息工具权限')
+
+
 def require_order_result_push_permission(request):
     permissions = request.user.role.permissions if isinstance(request.user.role.permissions, list) else []
     if not (request.user.is_superuser or request.user.role.code == 'admin' or 'data_factory.order_result_push' in permissions):
@@ -686,6 +768,8 @@ def require_data_factory_view_permission(request):
         'data_factory.view',
         'data_factory.account_add',
         'data_factory.account_balance',
+        'data_factory.member_status_activate',
+        'data_factory.member_query',
         'data_factory.order_result_push',
         'data_factory.rollback_settlement',
         'data_factory.bet_cancel',
@@ -1014,11 +1098,10 @@ class AutomationTaskViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
         return queryset
 
     def create(self, request, *args, **kwargs):
-        login_password = request.data.get('login_password', '')
+        login_password = str(request.data.get('login_password', '') or '').strip()
         if not login_password:
             raise ValidationError({'login_password': '请输入目标系统登录密码'})
         payload = request.data.copy()
-        payload.pop('login_password', None)
         serializer = self.get_serializer(data=payload)
         serializer.is_valid(raise_exception=True)
         task = serializer.save()
@@ -1048,9 +1131,7 @@ class AutomationTaskViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def run(self, request, pk=None):
         task = self.get_object()
-        login_password = request.data.get('login_password', '')
-        if not login_password:
-            raise ValidationError({'login_password': '请输入目标系统登录密码'})
+        login_password = str(request.data.get('login_password', '') or '').strip()
         results = execute_task(task, request.user, login_password)
         login_result = next((item for item in results if item.interface_name == '系统登录' and item.status == 'failed'), None)
         if login_result:
@@ -1073,9 +1154,7 @@ class AutomationTaskResultViewSet(ActionPermissionMixin, viewsets.ReadOnlyModelV
 
     @action(detail=True, methods=['post'])
     def retry(self, request, pk=None):
-        login_password = request.data.get('login_password', '')
-        if not login_password:
-            raise ValidationError({'login_password': '请输入目标系统登录密码'})
+        login_password = str(request.data.get('login_password', '') or '').strip()
         try:
             result = retry_task_result(self.get_object(), request.user, login_password)
         except ValueError as exc:
@@ -1253,7 +1332,11 @@ class MonitorTaskViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def run(self, request, pk=None):
-        execution = execute_monitor_task(self.get_object())
+        login_password = str(request.data.get('login_password', '') or '').strip()
+        execution = execute_monitor_task(self.get_object(), request.user, login_password)
+        login_failure = execution.details.filter(interface_name='系统登录', status='failed').first()
+        if login_failure:
+            raise ValidationError(login_failure.response_message)
         return success(MonitorExecutionSerializer(execution).data, '监控任务执行完成')
 
     @action(detail=True, methods=['get'])
@@ -1286,10 +1369,13 @@ class MonitorExecutionDetailViewSet(ActionPermissionMixin, viewsets.ReadOnlyMode
 
     @action(detail=True, methods=['post'])
     def retry(self, request, pk=None):
+        login_password = str(request.data.get('login_password', '') or '').strip()
         try:
-            detail = retry_monitor_detail(self.get_object())
+            detail = retry_monitor_detail(self.get_object(), request.user, login_password)
         except ValueError as exc:
             raise ValidationError(str(exc)) from exc
+        if detail.interface_name == '系统登录' and detail.status == 'failed':
+            raise ValidationError(detail.response_message)
         return success(self.get_serializer(detail).data, '监控接口重试完成')
 
 

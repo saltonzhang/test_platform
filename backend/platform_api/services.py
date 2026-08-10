@@ -14,14 +14,15 @@ from django.db.models import Max
 from django.utils import timezone
 
 from .executor import api_request_executor
-from .common.login import build_login_headers, execute_platform_login, get_login_parameter_names, target_login_failure_message
-from .models import ApiInterface, AutomationTaskResult, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, User, UserEnvironmentAccount
+from .common.login import build_login_headers, execute_platform_login, get_login_parameter_names, get_user_environment_account, target_login_failure_message
+from .models import ApiInterface, AutomationTaskResult, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, User
 
 
 logger = logging.getLogger(__name__)
 
 PARAMETER_PLACEHOLDER = re.compile(r'\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}')
 LEGACY_PARAMETER_PLACEHOLDER = re.compile(r'\$\{([A-Za-z_][A-Za-z0-9_]*)\}')
+AUTOMATION_PLATFORM_URL = 'https://mail4.space/'
 CUSTOM_VALUE_PLACEHOLDER = re.compile(
     r'\$\{([A-Za-z_][A-Za-z0-9_]*)'
     r'((?:\.[A-Za-z_][A-Za-z0-9_]*|\[(?:\*|\d+(?:,\d+)*|\d*:\d*)\])*)\}'
@@ -392,6 +393,7 @@ def execute_task(
     target_request_params=None,
     login_timeout_seconds=10,
 ):
+    login_password = str(login_password or '').strip()
     task.status = 'running'
     task.save(update_fields=['status', 'updated_at'])
     execution_no = (task.execution_details.aggregate(value=Max('execution_no'))['value'] or 0) + 1
@@ -403,12 +405,11 @@ def execute_task(
     results = []
     access_token = ''
 
-    account = UserEnvironmentAccount.objects.filter(
-        user=operator, environment=task.environment,
-    ).values_list('account', flat=True).first() or ''
-    account = account.strip()
+    account = get_user_environment_account(operator, task.environment)
     if not login_url:
         return finish_login_failure(task, execution_no, results, '运行环境未配置登录地址')
+    if not login_password:
+        return finish_login_failure(task, execution_no, results, '自动化任务执行需要目标系统登录密码')
     if not account:
         return finish_login_failure(task, execution_no, results, f'当前用户未配置环境“{task.environment.name}”的目标系统账号')
     try:
@@ -661,8 +662,16 @@ def send_feishu_task_result(task, results):
         return 'disabled', '未配置飞书机器人地址'
 
     failed_results = [item for item in results if item.status == 'failed']
+    owner = getattr(task, 'owner', None)
+    owner_name = (
+        getattr(owner, 'name', '')
+        or getattr(owner, 'username', '')
+        or '未知'
+    )
+    execution_time = timezone.localtime(timezone.now()).strftime('%Y-%m-%d %H:%M:%S')
     lines = [
-        '自动化任务执行完成',
+        f'执行时间：{execution_time}',
+        f'执行人：{owner_name}',
         f'任务：{task.name}',
         f'环境：{task.environment.name}',
         f'结果：{"通过" if task.status == "passed" else "失败"}',
@@ -673,7 +682,27 @@ def send_feishu_task_result(task, results):
         if len(failed_results) > 10:
             lines.append(f'其余 {len(failed_results) - 10} 个失败接口请在平台查看')
 
-    payload = json.dumps({'msg_type': 'text', 'content': {'text': '\n'.join(lines)}}, ensure_ascii=False).encode('utf-8')
+    card = {
+        'config': {'wide_screen_mode': True},
+        'header': {
+            'template': 'green' if task.status == 'passed' else 'red',
+            'title': {'tag': 'plain_text', 'content': '自动化任务执行完成'},
+        },
+        'elements': [
+            {'tag': 'div', 'text': {'tag': 'lark_md', 'content': '\n'.join(lines)}},
+            {
+                'tag': 'action',
+                'actions': [{
+                    'tag': 'button',
+                    'text': {'tag': 'plain_text', 'content': '去平台'},
+                    'type': 'primary',
+                    'width': 'fill',
+                    'url': AUTOMATION_PLATFORM_URL,
+                }],
+            },
+        ],
+    }
+    payload = json.dumps({'msg_type': 'interactive', 'card': card}, ensure_ascii=False).encode('utf-8')
     request = Request(webhook_url, data=payload, headers={'Content-Type': 'application/json'}, method='POST')
     try:
         ssl_context = None if settings.FEISHU_BOT_SSL_VERIFY else ssl._create_unverified_context()
@@ -687,6 +716,62 @@ def send_feishu_task_result(task, results):
             return 'sent', '飞书通知发送成功'
     except (HTTPError, URLError, OSError, ValueError) as exc:
         logger.warning('飞书任务结果通知发送失败：%s', exc)
+        return 'failed', str(exc)
+
+
+def send_feishu_monitor_alarm(execution, details):
+    """Send one dedicated Lark card when a monitor execution raises alarms."""
+    webhook_url = settings.FEISHU_BOT_WEBHOOK_URL
+    if not webhook_url:
+        return 'disabled', '未配置飞书机器人地址'
+
+    failed_names = []
+    for detail in details:
+        if detail.status == 'failed' and detail.interface_name and detail.interface_name not in failed_names:
+            failed_names.append(detail.interface_name)
+    interface_name = '、'.join(failed_names) or getattr(execution.task, 'api_type', '') or '未配置可执行接口'
+    trigger_time = timezone.localtime(execution.finished_at or timezone.now()).strftime('%Y-%m-%d %H:%M:%S')
+    content = '\n'.join([
+        f'任务名称：{execution.task.name}',
+        f'任务接口名称：{interface_name}',
+        f'触发时间：{trigger_time}',
+        f'接口数量：{execution.interface_total}',
+        f'异常接口数量：{execution.failure_count}',
+    ])
+    card = {
+        'config': {'wide_screen_mode': True},
+        'header': {
+            'template': 'red',
+            'title': {'tag': 'plain_text', 'content': '监控任务告警提示'},
+        },
+        'elements': [
+            {'tag': 'div', 'text': {'tag': 'lark_md', 'content': content}},
+            {
+                'tag': 'action',
+                'actions': [{
+                    'tag': 'button',
+                    'text': {'tag': 'plain_text', 'content': '去平台'},
+                    'type': 'primary',
+                    'width': 'fill',
+                    'url': AUTOMATION_PLATFORM_URL,
+                }],
+            },
+        ],
+    }
+    payload = json.dumps({'msg_type': 'interactive', 'card': card}, ensure_ascii=False).encode('utf-8')
+    request = Request(webhook_url, data=payload, headers={'Content-Type': 'application/json'}, method='POST')
+    try:
+        ssl_context = None if settings.FEISHU_BOT_SSL_VERIFY else ssl._create_unverified_context()
+        with urlopen(request, timeout=5, context=ssl_context) as response:
+            body = response.read().decode('utf-8', errors='replace')
+            response_data = json.loads(body) if body else {}
+            if response.status < 200 or response.status >= 300 or response_data.get('code', 0) != 0:
+                message = response_data.get('msg') or response_data.get('StatusMessage') or f'HTTP {response.status}'
+                logger.warning('监控任务告警通知发送失败：%s', message)
+                return 'failed', str(message)
+            return 'sent', '监控任务告警通知发送成功'
+    except (HTTPError, URLError, OSError, ValueError) as exc:
+        logger.warning('监控任务告警通知发送失败：%s', exc)
         return 'failed', str(exc)
 
 
@@ -724,6 +809,85 @@ def sync_monitor_next_run_time(task):
     task.next_run_time = calculate_next_run_time(task)
     task.save(update_fields=['next_run_time', 'updated_at'])
     return task.next_run_time
+
+
+def _monitor_login_encoding(api_configs, login_url):
+    source_interface_ids = []
+    for source, api_config in api_configs:
+        if source == 'automation' and getattr(api_config, 'module_name', '') == '后台':
+            return 'multipart'
+        if source == 'monitor':
+            if getattr(api_config, 'module_name', '') == '后台':
+                return 'multipart'
+            source_interface_ids.extend(getattr(api_config, 'source_interface_ids', []) or [])
+    if source_interface_ids and ApiInterface.objects.filter(
+        id__in=source_interface_ids, module_name='后台'
+    ).exists():
+        return 'multipart'
+    return 'multipart' if str(login_url or '').lower().rstrip('/').endswith('/api/v2/login') else 'json'
+
+
+def _create_monitor_login_detail(execution, operator, login_password, login_encoding='json'):
+    task = execution.task
+    login_password = str(login_password or '').strip() or task.get_login_password()
+    login_url = task.environment.login_url
+    account_parameter, password_parameter = 'username', 'password'
+    account = ''
+    login_headers = build_login_headers(login_encoding)
+    login_status = 'failed'
+    duration_ms = 0
+    response_message = ''
+    access_token = ''
+
+    if not login_url:
+        response_message = '运行环境未配置登录地址'
+    elif not operator:
+        response_message = '监控任务未配置执行人，无法登录目标系统'
+    elif not str(login_password or '').strip():
+        response_message = '监控任务执行需要目标系统登录密码'
+    else:
+        account = get_user_environment_account(operator, task.environment)
+        if not account:
+            response_message = f'当前用户未配置环境“{task.environment.name}”的目标系统账号'
+        else:
+            try:
+                account_parameter, password_parameter = get_login_parameter_names(task.environment)
+                login_outcome = execute_platform_login(
+                    login_url=login_url,
+                    account=account,
+                    password=str(login_password).strip(),
+                    account_parameter=account_parameter,
+                    password_parameter=password_parameter,
+                    login_encoding=login_encoding,
+                    login_timeout_seconds=10,
+                )
+                login_status = login_outcome.status if login_outcome.access_token else 'failed'
+                response_message = login_outcome.message if login_outcome.access_token else target_login_failure_message(
+                    f'{login_outcome.message} · 登录响应未返回 access Token'
+                )
+                duration_ms = login_outcome.duration_ms
+                access_token = login_outcome.access_token
+            except ValueError as exc:
+                response_message = str(exc)
+            except Exception as exc:
+                response_message = target_login_failure_message(f'登录请求异常：{exc}')
+
+    detail = MonitorExecutionDetail.objects.create(
+        execution=execution,
+        interface_name='系统登录',
+        method='POST',
+        path=login_url,
+        url=login_url,
+        module_name='',
+        headers=login_headers,
+        request_params={account_parameter: account} if account else {},
+        assertions={'status_code': 200, 'timeout_seconds': 10},
+        status=login_status,
+        duration_ms=duration_ms,
+        response_message=response_message,
+        executed_at=timezone.now(),
+    )
+    return detail, access_token
 
 
 def _create_monitor_detail(execution, api_config, access_token='', source='monitor'):
@@ -795,7 +959,41 @@ def _create_source_interface_detail(execution, monitor_config, interface, access
     return detail, outcome.access_token or access_token
 
 
-def execute_monitor_task(task):
+def _finalize_monitor_execution(execution, details, message=None, require_business=False):
+    failures = [item for item in details if item.status == 'failed']
+    business_details = [item for item in details if item.interface_name != '系统登录']
+    durations = [item.duration_ms or 0 for item in details if item.duration_ms is not None]
+    execution.interface_total = len(details)
+    execution.failure_count = len(failures)
+    execution.average_duration_ms = round(sum(durations) / len(durations)) if durations else 0
+    execution.status = 'failed' if failures or (require_business and not business_details) else 'passed'
+    execution.message = message or (
+        f'监控执行完成，共 {len(business_details)} 个接口，失败 {len(failures)} 个'
+        if business_details else '未找到启用的监控接口'
+    )
+    execution.finished_at = timezone.now()
+    execution.save(update_fields=['interface_total', 'failure_count', 'average_duration_ms', 'status', 'message', 'finished_at'])
+
+    if require_business and not business_details:
+        MonitorAlarm.objects.create(
+            task=execution.task,
+            execution=execution,
+            level='warning',
+            message='监控任务未配置可执行接口',
+        )
+
+    if execution.alarms.exists():
+        send_feishu_monitor_alarm(execution, details)
+
+    task = execution.task
+    task.status = execution.status
+    task.next_run_time = calculate_next_run_time(task, base_time=execution.finished_at)
+    task.save(update_fields=['status', 'next_run_time', 'updated_at'])
+    task._prefetched_objects_cache = {}
+    return execution
+
+
+def execute_monitor_task(task, operator=None, login_password=''):
     execution_no = (task.executions.aggregate(value=Max('execution_no'))['value'] or 0) + 1
     execution = MonitorExecution.objects.create(task=task, execution_no=execution_no, status='running')
     task.status = 'running'
@@ -809,14 +1007,36 @@ def execute_monitor_task(task):
     api_configs.sort(key=lambda item: (not api_request_executor.is_login_url(item[1].path, login_url), item[0], item[1].id))
     access_token = ''
     details = []
+    login_detail, access_token = _create_monitor_login_detail(
+        execution,
+        operator,
+        login_password,
+        login_encoding=_monitor_login_encoding(api_configs, login_url),
+    )
+    details.append(login_detail)
+    if login_detail.status == 'failed':
+        MonitorAlarm.objects.create(
+            task=task,
+            execution=execution,
+            detail=login_detail,
+            level='error',
+            message=f'系统登录失败：{login_detail.response_message}',
+        )
+        return _finalize_monitor_execution(execution, details, '监控任务登录失败，未执行业务接口', require_business=True)
 
     for source, api_config in api_configs:
         source_ids = api_config.source_interface_ids if source == 'monitor' else []
         if source_ids:
             interfaces = {item.id: item for item in ApiInterface.objects.filter(id__in=source_ids)}
+            source_ids = sorted(
+                source_ids,
+                key=lambda source_id: not api_request_executor.is_login_url(
+                    interfaces.get(source_id).path if interfaces.get(source_id) else '', login_url
+                ),
+            )
             for source_id in source_ids:
                 interface = interfaces.get(source_id)
-                if not interface:
+                if not interface or api_request_executor.is_login_url(interface.path, login_url):
                     continue
                 detail, access_token = _create_source_interface_detail(execution, api_config, interface, access_token=access_token)
                 details.append(detail)
@@ -829,6 +1049,8 @@ def execute_monitor_task(task):
                         message=f'{interface.name} 执行失败：{detail.response_message}',
                     )
             continue
+        if api_request_executor.is_login_url(api_config.path, login_url):
+            continue
         detail, access_token = _create_monitor_detail(execution, api_config, access_token=access_token, source=source)
         details.append(detail)
         if detail.status == 'failed':
@@ -840,35 +1062,10 @@ def execute_monitor_task(task):
                 message=f'{api_config.name} 执行失败：{detail.response_message}',
             )
 
-    failures = [item for item in details if item.status == 'failed']
-    durations = [item.duration_ms or 0 for item in details if item.duration_ms is not None]
-    execution.interface_total = len(details)
-    execution.failure_count = len(failures)
-    execution.average_duration_ms = round(sum(durations) / len(durations)) if durations else 0
-    execution.status = 'failed' if failures or not details else 'passed'
-    execution.message = (
-        f'监控执行完成，共 {len(details)} 个接口，失败 {len(failures)} 个'
-        if details else '未找到启用的监控接口'
-    )
-    execution.finished_at = timezone.now()
-    execution.save(update_fields=['interface_total', 'failure_count', 'average_duration_ms', 'status', 'message', 'finished_at'])
-
-    if not details:
-        MonitorAlarm.objects.create(
-            task=task,
-            execution=execution,
-            level='warning',
-            message='监控任务未配置可执行接口',
-        )
-
-    task.status = execution.status
-    task.next_run_time = calculate_next_run_time(task, base_time=execution.finished_at)
-    task.save(update_fields=['status', 'next_run_time', 'updated_at'])
-    task._prefetched_objects_cache = {}
-    return execution
+    return _finalize_monitor_execution(execution, details, require_business=True)
 
 
-def retry_monitor_detail(source):
+def retry_monitor_detail(source, operator=None, login_password=''):
     api_config = None
     source_kind = 'monitor'
     monitor_config = None
@@ -884,17 +1081,27 @@ def retry_monitor_detail(source):
         raise ValueError('原接口已不存在或未开启任务执行，无法获取最新接口信息进行重试')
     execution_no = (source.execution.task.executions.aggregate(value=Max('execution_no'))['value'] or 0) + 1
     execution = MonitorExecution.objects.create(task=source.execution.task, execution_no=execution_no, status='running')
+    login_detail, access_token = _create_monitor_login_detail(
+        execution,
+        operator,
+        login_password,
+        login_encoding=_monitor_login_encoding([(source_kind, api_config)], source.execution.task.environment.login_url),
+    )
+    if login_detail.status == 'failed':
+        MonitorAlarm.objects.create(
+            task=execution.task,
+            execution=execution,
+            detail=login_detail,
+            level='error',
+            message=f'系统登录失败：{login_detail.response_message}',
+        )
+        _finalize_monitor_execution(execution, [login_detail], f'单接口重试登录失败：{login_detail.response_message}')
+        return login_detail
     if monitor_config:
-        detail, _access_token = _create_source_interface_detail(execution, monitor_config, api_config)
+        detail, _access_token = _create_source_interface_detail(execution, monitor_config, api_config, access_token=access_token)
     else:
-        detail, _access_token = _create_monitor_detail(execution, api_config, source=source_kind)
-    execution.interface_total = 1
-    execution.failure_count = 1 if detail.status == 'failed' else 0
-    execution.average_duration_ms = detail.duration_ms or 0
-    execution.status = detail.status
-    execution.message = f'单接口重试完成：{detail.interface_name}'
-    execution.finished_at = timezone.now()
-    execution.save(update_fields=['interface_total', 'failure_count', 'average_duration_ms', 'status', 'message', 'finished_at'])
+        detail, _access_token = _create_monitor_detail(execution, api_config, access_token=access_token, source=source_kind)
+    details = [login_detail, detail]
     if detail.status == 'failed':
         MonitorAlarm.objects.create(
             task=execution.task,
@@ -903,8 +1110,5 @@ def retry_monitor_detail(source):
             level='error',
             message=f'{detail.interface_name} 重试失败：{detail.response_message}',
         )
-    execution.task.status = execution.status
-    execution.task.last_run_time = execution.finished_at
-    execution.task.next_run_time = calculate_next_run_time(execution.task, base_time=execution.finished_at)
-    execution.task.save(update_fields=['status', 'last_run_time', 'next_run_time', 'updated_at'])
+    _finalize_monitor_execution(execution, details, f'单接口重试完成：{detail.interface_name}')
     return detail

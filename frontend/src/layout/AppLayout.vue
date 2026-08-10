@@ -4,7 +4,7 @@
       <div class="brand"><span class="brand-mark">A</span><div><b>AIBET</b><small>智能自动化平台</small></div></div>
       <nav>
         <router-link v-if="hasPermission('home.view')" to="/"><el-icon><HomeFilled /></el-icon><span>首页</span></router-link>
-        <div v-if="hasAnyPermission(['data_factory.view','data_factory.account_balance','data_factory.account_add','data_factory.order_result_push','data_factory.rollback_settlement','data_factory.bet_cancel','data_factory.rollback_bet_cancel'])" :class="['nav-group',{open:expandedGroups.intelligence}]">
+        <div v-if="hasAnyPermission(['data_factory.view','data_factory.account_balance','data_factory.account_add','data_factory.member_status_activate','data_factory.member_query','data_factory.order_result_push','data_factory.rollback_settlement','data_factory.bet_cancel','data_factory.rollback_bet_cancel'])" :class="['nav-group',{open:expandedGroups.intelligence}]">
           <button class="nav-parent" :class="{active:route.path.startsWith('/intelligence')}" type="button" :aria-expanded="expandedGroups.intelligence" aria-controls="intelligence-menu" @click="toggleGroup('intelligence')"><el-icon><MagicStick /></el-icon><span>智能工具</span><el-icon class="nav-arrow"><ArrowRight /></el-icon></button>
           <div id="intelligence-menu" class="nav-children">
             <strong class="nav-flyout-title">智能工具</strong>
@@ -23,9 +23,9 @@
           <button class="nav-parent" :class="{active:route.path.startsWith('/monitor')}" type="button" :aria-expanded="expandedGroups.monitor" aria-controls="monitor-menu" @click="toggleGroup('monitor')"><el-icon><Monitor /></el-icon><span>监控中心</span><el-icon class="nav-arrow"><ArrowRight /></el-icon></button>
           <div id="monitor-menu" class="nav-children">
             <strong class="nav-flyout-title">监控中心</strong>
-            <router-link v-if="hasPermission('monitor.api.view')" to="/monitor/interfaces"><span>接口管理</span></router-link>
+            <router-link v-if="hasPermission('monitor.api.view')" to="/monitor/interfaces"><span>任务包</span></router-link>
             <router-link v-if="hasPermission('monitor.task.view')" to="/monitor/tasks"><span>任务管理</span></router-link>
-            <router-link v-if="hasPermission('monitor.alarm.view')" to="/monitor/alarms"><span>报警记录</span></router-link>
+            <router-link v-if="hasPermission('monitor.alarm.view')" to="/monitor/alarms"><span>告警记录</span></router-link>
           </div>
         </div>
         <div v-if="hasAnyPermission(['environment.view','users.view','roles.view'])" :class="['nav-group',{open:expandedGroups.settings}]">
@@ -52,11 +52,11 @@
 </template>
 <script setup lang="ts">
 import { computed,reactive,ref,watch } from 'vue'; import { useRoute,useRouter } from 'vue-router'; import { auth,clearAuth,hasPermission } from '@/auth'; import EnvironmentAccountSettings from '@/components/EnvironmentAccountSettings.vue'
-type NavGroup='intelligence'|'automation'|'monitor'|'settings'
+type NavGroup='intelligence'|'automation'|'testcase'|'monitor'|'settings'
 const route=useRoute(),router=useRouter(),collapsed=ref(false),environmentAccountVisible=ref(false)
-const expandedGroups=reactive<Record<NavGroup,boolean>>({intelligence:route.path.startsWith('/intelligence'),automation:route.path.startsWith('/automation'),monitor:route.path.startsWith('/monitor'),settings:route.path.startsWith('/settings')})
-const breadcrumb=computed(()=>route.path==='/intelligence/data-factory'?'智能工具 / 数据工厂':route.path==='/automation/interface'?'自动化 / 接口':route.path==='/automation/execution'?'自动化 / 执行':route.path==='/monitor/interfaces'?'监控中心 / 接口管理':route.path==='/monitor/tasks'?'监控中心 / 任务管理':route.path==='/monitor/alarms'?'监控中心 / 报警记录':route.path==='/settings/environment'?'配置 / 环境配置':route.path==='/settings/users'?'配置 / 用户管理':route.path==='/settings/roles'?'配置 / 角色管理':'首页')
-function groupForPath(path:string):NavGroup|undefined{return path.startsWith('/intelligence')?'intelligence':path.startsWith('/automation')?'automation':path.startsWith('/monitor')?'monitor':path.startsWith('/settings')?'settings':undefined}
+const expandedGroups=reactive<Record<NavGroup,boolean>>({intelligence:route.path.startsWith('/intelligence'),automation:route.path.startsWith('/automation'),testcase:route.path.startsWith('/testcase'),monitor:route.path.startsWith('/monitor'),settings:route.path.startsWith('/settings')})
+const breadcrumb=computed(()=>route.path==='/intelligence/data-factory'?'智能工具 / 数据工厂':route.path==='/automation/interface'?'自动化 / 接口':route.path==='/automation/execution'?'自动化 / 执行':route.path==='/testcase/packages'?'用例管理 / 用例包':route.path.startsWith('/testcase/packages/')?'用例管理 / 用例包 / 在线编辑':route.path==='/testcase/execution'?'用例管理 / 用例执行':route.path==='/monitor/interfaces'?'监控中心 / 任务包':route.path==='/monitor/tasks'?'监控中心 / 任务管理':route.path==='/monitor/alarms'?'监控中心 / 告警记录':route.path==='/settings/environment'?'配置 / 环境配置':route.path==='/settings/users'?'配置 / 用户管理':route.path==='/settings/roles'?'配置 / 角色管理':'首页')
+function groupForPath(path:string):NavGroup|undefined{return path.startsWith('/intelligence')?'intelligence':path.startsWith('/automation')?'automation':path.startsWith('/testcase')?'testcase':path.startsWith('/monitor')?'monitor':path.startsWith('/settings')?'settings':undefined}
 function hasAnyPermission(codes:string[]){return codes.some(hasPermission)}
 function toggleGroup(group:NavGroup){if(collapsed.value){collapsed.value=false;expandedGroups[group]=true;return}expandedGroups[group]=!expandedGroups[group]}
 watch(()=>route.path,path=>{const group=groupForPath(path);if(group)expandedGroups[group]=true})

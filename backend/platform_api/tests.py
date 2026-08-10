@@ -1,5 +1,7 @@
 import os
 import json
+import io
+import zipfile
 from datetime import datetime
 from decimal import Decimal
 from unittest.mock import Mock, patch
@@ -10,12 +12,14 @@ from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
+from django.core.files.uploadedfile import SimpleUploadedFile
 
 from .models import ApiInterface, AutomationModule, AutomationTask, AutomationTaskResult, DataFactoryExecution, Environment, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorTask, Role, User, UserEnvironmentAccount
 from .executor import api_request_executor
 from .interface_import import parse_fetch_text
+from .testcase.services import parse_xmind_package
 from .serializers import AutomationTaskSerializer, DataFactoryExecutionSerializer
-from .services import build_full_parameter_scenarios, build_parameter_variables, build_request_url, execute_task, replace_parameter_variables, resolve_full_custom_value
+from .services import AUTOMATION_PLATFORM_URL, build_full_parameter_scenarios, build_parameter_variables, build_request_url, execute_task, replace_parameter_variables, resolve_full_custom_value, send_feishu_monitor_alarm, send_feishu_task_result
 
 
 class FakeHttpResponse:
@@ -37,6 +41,24 @@ class JsonFakeHttpResponse(FakeHttpResponse):
 
     def read(self, size=-1):
         return json.dumps(self.body).encode('utf-8')
+
+
+class TestCasePackageImportTests(SimpleTestCase):
+    def test_parses_xmind_content_json_into_tree(self):
+        payload = io.BytesIO()
+        with zipfile.ZipFile(payload, 'w') as archive:
+            archive.writestr('content.json', json.dumps([{
+                'rootTopic': {
+                    'title': '登录用例包',
+                    'markers': [{'markerId': 'priority-1'}],
+                    'children': {'attached': [{'title': '登录成功', 'children': {'attached': [{'title': '校验首页'}]}}]},
+                },
+            }]))
+        name, content = parse_xmind_package(SimpleUploadedFile('login.xmind', payload.getvalue()))
+        self.assertEqual(name, '登录用例包')
+        self.assertEqual(content['tag'], ['待定'])
+        self.assertEqual(content['children'][0]['title'], '登录成功')
+        self.assertEqual(content['children'][0]['children'][0]['title'], '校验首页')
 
 
 class DatabaseConfigTests(SimpleTestCase):
@@ -166,6 +188,58 @@ class DataFactoryCredentialTests(SimpleTestCase):
         self.assertEqual(get_data_factory_credentials('backend'), ('backend-account', 'backend-password'))
 
 
+class DataFactoryMemberQueryTests(SimpleTestCase):
+    @patch('platform_api.data_factory.member_query.query_one', return_value={
+        'id': 407361968781922304,
+        'uuid': '21181393-7bc4-4eb1-b4f1-80eae482fcbe',
+        'id_number': '31751198243',
+        'email': 'colin7672@proton.me',
+        'nickname': 'User442106',
+    })
+    def test_member_query_maps_fields_without_password(self, mocked_query_one):
+        from platform_api.data_factory.member_query import query_member_by_email
+
+        result = query_member_by_email(' Colin7672@Proton.me ', environment_name='helix')
+
+        mocked_query_one.assert_called_once_with(
+            'SELECT id, uuid, id_number, email, nickname FROM member WHERE email = %s LIMIT 1',
+            ('colin7672@proton.me',),
+        )
+        self.assertEqual(result, {
+            'environment_name': 'helix',
+            'email': 'colin7672@proton.me',
+            'uid': '21181393-7bc4-4eb1-b4f1-80eae482fcbe',
+            'cpf': '31751198243',
+            'member_id': '407361968781922304',
+            'nickname': 'User442106',
+        })
+        self.assertNotIn('password', result)
+
+
+class DataFactoryMemberStatusActivateTests(SimpleTestCase):
+    @patch('platform_api.data_factory.member_status_activate.DatabaseClient')
+    def test_member_status_activate_updates_last_active_time_with_parameterized_sql(self, mocked_database_client):
+        from platform_api.data_factory.member_status_activate import activate_member_status
+
+        mocked_db = mocked_database_client.return_value.__enter__.return_value
+        mocked_db.execute_write.return_value = 1
+
+        result = activate_member_status('402349924005449728', environment_name='helix')
+
+        mocked_db.execute_write.assert_called_once()
+        sql, params = mocked_db.execute_write.call_args.args
+        self.assertIn('UPDATE member_extra', sql)
+        self.assertIn('SET last_active_time = NOW()', sql)
+        self.assertEqual(params, ('402349924005449728',))
+        self.assertEqual(result, {
+            'environment_name': 'helix',
+            'member_id': '402349924005449728',
+            'affected_rows': 1,
+            'status': 'passed',
+            'message': '用户状态已激活，影响行数 1',
+        })
+
+
 class DataFactoryAccountAddKycTests(SimpleTestCase):
     @patch('platform_api.data_factory.account_add.requests.post')
     @patch('platform_api.data_factory.account_add.query_one', side_effect=RuntimeError('missing db config'))
@@ -182,17 +256,12 @@ class DataFactoryAccountAddKycTests(SimpleTestCase):
             login_url='https://mgt-api-test.helix.city/api/v2/login',
             id=99,
         )
-        operator = SimpleNamespace(username='admin')
-
         with self.assertRaisesMessage(DataFactoryError, '查询账号是否存在时出错'):
             _run_single_account(
                 frontend_environment,
                 backend_environment,
-                username='admin',
-                password='target-login-pass',
                 email='colin7672@proton.me',
                 amount=Decimal('7'),
-                operator=operator,
             )
 
         mocked_query_one.assert_called_once_with(
@@ -257,16 +326,11 @@ class DataFactoryAccountAddKycTests(SimpleTestCase):
             login_url='https://mgt-api-test.helix.city/api/v2/login',
             id=99,
         )
-        operator = SimpleNamespace(username='admin')
-
         result = _run_single_account(
             frontend_environment,
             backend_environment,
-            username='admin',
-            password='target-login-pass',
             email='colin7672@proton.me',
             amount=Decimal('0'),
-            operator=operator,
         )
 
         mocked_mark_kyc_passed.assert_called_once_with('404211509485375488')
@@ -309,6 +373,71 @@ class OrderResultRollbackTests(SimpleTestCase):
         self.assertIn('<market id="18" specifiers="total=1.5"/>', payload['content'])
         self.assertEqual(result['event_id'], 'sr:match:66886848')
         self.assertEqual(result['payload'], payload)
+
+
+class FeishuAutomationNotificationTests(SimpleTestCase):
+    @override_settings(FEISHU_BOT_WEBHOOK_URL='https://example.test/feishu-hook', FEISHU_BOT_SSL_VERIFY=True)
+    @patch('platform_api.services.urlopen')
+    def test_notification_contains_platform_url_and_action_button(self, mocked_urlopen):
+        mocked_urlopen.return_value = JsonFakeHttpResponse({'code': 0})
+        task = SimpleNamespace(
+            name='下单回归',
+            status='passed',
+            environment=SimpleNamespace(name='测试环境'),
+            owner=SimpleNamespace(name='测试人员', username='tester'),
+        )
+        result = SimpleNamespace(status='passed', interface_name='创建订单')
+
+        notification_status, notification_message = send_feishu_task_result(task, [result])
+
+        self.assertEqual(notification_status, 'sent')
+        self.assertEqual(notification_message, '飞书通知发送成功')
+        request = mocked_urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode('utf-8'))
+        self.assertEqual(payload['msg_type'], 'interactive')
+        elements = payload['card']['elements']
+        content = elements[0]['text']['content']
+        self.assertIn('执行时间：', content)
+        self.assertIn('执行人：测试人员', content)
+        self.assertNotIn('平台地址：', content)
+        action = elements[1]['actions'][0]
+        self.assertEqual(action['text']['content'], '去平台')
+        self.assertEqual(action['url'], AUTOMATION_PLATFORM_URL)
+        self.assertEqual(action['width'], 'fill')
+
+    @override_settings(FEISHU_BOT_WEBHOOK_URL='https://example.test/feishu-hook', FEISHU_BOT_SSL_VERIFY=True)
+    @patch('platform_api.services.urlopen')
+    def test_monitor_alarm_notification_uses_dedicated_template(self, mocked_urlopen):
+        mocked_urlopen.return_value = JsonFakeHttpResponse({'code': 0})
+        finished_at = timezone.make_aware(datetime(2026, 8, 5, 20, 30))
+        task = SimpleNamespace(name='VIP 监控任务', api_type='VIP 权益')
+        execution = SimpleNamespace(
+            task=task,
+            finished_at=finished_at,
+            interface_total=3,
+            failure_count=1,
+        )
+        details = [
+            SimpleNamespace(status='passed', interface_name='VIP 等级'),
+            SimpleNamespace(status='failed', interface_name='VIP 权益'),
+        ]
+
+        notification_status, notification_message = send_feishu_monitor_alarm(execution, details)
+
+        self.assertEqual(notification_status, 'sent')
+        self.assertEqual(notification_message, '监控任务告警通知发送成功')
+        request = mocked_urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode('utf-8'))
+        self.assertEqual(payload['card']['header']['title']['content'], '监控任务告警提示')
+        content = payload['card']['elements'][0]['text']['content']
+        self.assertIn('任务名称：VIP 监控任务', content)
+        self.assertIn('任务接口名称：VIP 权益', content)
+        self.assertIn('触发时间：2026-08-05 20:30:00', content)
+        self.assertIn('接口数量：3', content)
+        self.assertIn('异常接口数量：1', content)
+        action = payload['card']['elements'][1]['actions'][0]
+        self.assertEqual(action['text']['content'], '去平台')
+        self.assertEqual(action['url'], AUTOMATION_PLATFORM_URL)
 
 
 class OrderResultCancelTests(SimpleTestCase):
@@ -719,18 +848,97 @@ class PlatformApiTests(APITestCase):
                 denied_response = self.client.post(path, {}, format='json')
                 self.assertEqual(denied_response.status_code, status.HTTP_403_FORBIDDEN)
 
+    def test_data_factory_member_query_requires_dedicated_permission(self):
+        role = Role.objects.create(name='会员查询员', code='member_query_operator', permissions=[])
+        operator = User.objects.create_user(username='member-query-operator', password='SafePass@123', name='会员查询员', role=role)
+        self.client.force_authenticate(operator)
+
+        denied_response = self.client.post('/api/data-factory/member-query/', {}, format='json')
+        self.assertEqual(denied_response.status_code, status.HTTP_403_FORBIDDEN)
+
+        role.permissions = ['data_factory.member_query']
+        role.save(update_fields=['permissions'])
+        allowed_response = self.client.post('/api/data-factory/member-query/', {}, format='json')
+        self.assertEqual(allowed_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_data_factory_member_status_activate_requires_dedicated_permission(self):
+        role = Role.objects.create(name='用户状态管理员', code='member_status_operator', permissions=[])
+        operator = User.objects.create_user(username='member-status-operator', password='SafePass@123', name='用户状态管理员', role=role)
+        self.client.force_authenticate(operator)
+
+        denied_response = self.client.post('/api/data-factory/member-status-activate/', {}, format='json')
+        self.assertEqual(denied_response.status_code, status.HTTP_403_FORBIDDEN)
+
+        role.permissions = ['data_factory.member_status_activate']
+        role.save(update_fields=['permissions'])
+        allowed_response = self.client.post('/api/data-factory/member-status-activate/', {}, format='json')
+        self.assertEqual(allowed_response.status_code, status.HTTP_400_BAD_REQUEST)
+
     def test_data_factory_environment_list_uses_tool_permission_and_hides_variables(self):
         Environment.objects.create(
             name='工具环境', base_url='https://tool.example.com', login_url='https://tool.example.com/login',
             variables=[{'key': 'SECRET_TOKEN', 'value': 'secret-value'}],
         )
-        role = Role.objects.create(name='数据工具员', code='data_tool_operator', permissions=['data_factory.account_add'])
+        role = Role.objects.create(name='数据工具员', code='data_tool_operator', permissions=['data_factory.member_status_activate'])
         operator = User.objects.create_user(username='data-tool-operator', password='SafePass@123', name='数据工具员', role=role)
         self.client.force_authenticate(operator)
         response = self.client.get('/api/data-factory/environments/')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['data'][0]['variables'], [])
         self.assertNotIn('secret-value', str(response.data))
+
+    @patch('platform_api.views.query_member_by_email', return_value={
+        'environment_name': 'helix',
+        'email': 'colin7672@proton.me',
+        'uid': '21181393-7bc4-4eb1-b4f1-80eae482fcbe',
+        'cpf': '31751198243',
+        'member_id': '407361968781922304',
+        'nickname': 'User442106',
+    })
+    def test_data_factory_member_query_returns_selected_environment_and_sanitized_fields(self, mocked_query_member):
+        environment = Environment.objects.create(
+            name='helix', base_url='https://tool.example.com', login_url='https://tool.example.com/login',
+        )
+
+        response = self.client.post('/api/data-factory/member-query/', {
+            'environment': environment.id,
+            'email': 'Colin7672@Proton.me',
+        }, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mocked_query_member.assert_called_once_with('colin7672@proton.me', environment_name='helix')
+        self.assertEqual(response.data['data']['member_id'], '407361968781922304')
+        self.assertEqual(response.data['data']['uid'], '21181393-7bc4-4eb1-b4f1-80eae482fcbe')
+        self.assertNotIn('password', str(response.data).lower())
+        execution = DataFactoryExecution.objects.get(tool_name='查询用户信息', email='colin7672@proton.me')
+        self.assertEqual(execution.environment, environment)
+        self.assertEqual(execution.member_id, '407361968781922304')
+
+    @patch('platform_api.views.activate_member_status', return_value={
+        'environment_name': 'helix',
+        'member_id': '402349924005449728',
+        'affected_rows': 1,
+        'status': 'passed',
+        'message': '用户状态已激活，影响行数 1',
+    })
+    def test_data_factory_member_status_activate_returns_selected_environment_and_records_execution(self, mocked_activate_member_status):
+        environment = Environment.objects.create(
+            name='helix', base_url='https://tool.example.com', login_url='https://tool.example.com/login',
+        )
+
+        response = self.client.post('/api/data-factory/member-status-activate/', {
+            'environment': environment.id,
+            'member_id': '402349924005449728',
+        }, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mocked_activate_member_status.assert_called_once_with('402349924005449728', environment_name='helix')
+        self.assertEqual(response.data['data']['member_id'], '402349924005449728')
+        self.assertEqual(response.data['data']['affected_rows'], 1)
+        self.assertNotIn('password', str(response.data).lower())
+        execution = DataFactoryExecution.objects.get(tool_name='用户状态激活', member_id='402349924005449728')
+        self.assertEqual(execution.environment, environment)
+        self.assertEqual(execution.message, '用户状态已激活，影响行数 1')
 
     def test_current_admin_cannot_be_deleted_or_demoted(self):
         response = self.client.delete(f'/api/users/{self.admin.id}/')
@@ -746,9 +954,9 @@ class PlatformApiTests(APITestCase):
         role_id = response.data['data']['id']
 
         response = self.client.post(f'/api/roles/{role_id}/permissions/', {
-            'permissions': ['home.view', 'automation.view', 'data_factory.account_add', 'home.view']
+            'permissions': ['home.view', 'automation.view', 'data_factory.account_add', 'data_factory.member_query', 'data_factory.member_status_activate', 'home.view']
         }, format='json')
-        self.assertEqual(response.data['data']['permissions'], ['home.view', 'automation.view', 'data_factory.account_add'])
+        self.assertEqual(response.data['data']['permissions'], ['home.view', 'automation.view', 'data_factory.account_add', 'data_factory.member_query', 'data_factory.member_status_activate'])
 
         user = User.objects.create_user(
             username='observer', password='SafePass@123', name='观察员',
@@ -1607,7 +1815,11 @@ fetch("https://api-test.helix.city/api/v1/member/getUnreadCount?scope=all", {
 
     @patch('platform_api.executor.urlopen', return_value=FakeHttpResponse())
     def test_monitor_center_configs_tasks_alarms_and_retry(self, mocked_urlopen):
-        environment = Environment.objects.create(name='监控环境', base_url='https://monitor.example.com')
+        environment = Environment.objects.create(
+            name='监控环境', base_url='https://monitor.example.com',
+            login_url='https://monitor.example.com/api/auth/login/',
+        )
+        self.set_environment_account(environment)
         interface = ApiInterface.objects.create(
             name='VIP 等级', method='GET', path='/api/v1/vip/levels', module_name='个人中心',
             headers={'Content-Type': 'application/json; charset=utf-8'}, request_params={},
@@ -1638,6 +1850,15 @@ fetch("https://api-test.helix.city/api/v1/member/getUnreadCount?scope=all", {
         interface.save(update_fields=['can_execute_in_task', 'assertions'])
 
         response = self.client.post('/api/monitor/tasks/', {
+            'name': '按接口名称创建任务', 'module_name': '个人中心', 'api_type': 'VIP 等级',
+            'environment': environment.id, 'interval_value': 1,
+            'interval_unit': 'minute', 'enabled': True,
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['data']['api_config_ids'], [config_id])
+        self.assertEqual(response.data['data']['automation_interface_ids'], [interface.id])
+
+        response = self.client.post('/api/monitor/tasks/', {
             'name': 'VIP 监控', 'module_name': '个人中心', 'api_type': '核心链路',
             'environment': environment.id, 'api_config_ids': [config_id],
             'automation_interface_ids': [interface.id], 'interval_value': 1,
@@ -1650,11 +1871,15 @@ fetch("https://api-test.helix.city/api/v1/member/getUnreadCount?scope=all", {
         self.assertEqual(response.data['data']['api_count'], 3)
         self.assertIsNotNone(response.data['data']['next_run_time'])
 
-        response = self.client.post(f'/api/monitor/tasks/{task_id}/run/', {}, format='json')
+        response = self.client.post(
+            f'/api/monitor/tasks/{task_id}/run/',
+            {'login_password': 'target-login-pass'}, format='json',
+        )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['data']['status'], 'failed')
-        self.assertEqual(response.data['data']['interface_total'], 3)
+        self.assertEqual(response.data['data']['interface_total'], 4)
         self.assertEqual(response.data['data']['failure_count'], 1)
+        self.assertEqual(response.data['data']['details'][0]['interface_name'], '系统登录')
         detail = MonitorExecutionDetail.objects.get(execution_id=response.data['data']['id'], source_api_config_id=config_id, source_interface_id=failed_interface.id)
         automation_detail = MonitorExecutionDetail.objects.get(execution_id=response.data['data']['id'], source_api_config_id=None, source_interface_id=interface.id)
         self.assertEqual(detail.url, 'https://monitor.example.com/api/v1/vip/benefits')
@@ -1664,7 +1889,10 @@ fetch("https://api-test.helix.city/api/v1/member/getUnreadCount?scope=all", {
         failed_interface.path = '/api/v1/vip/benefits/latest'
         failed_interface.assertions = {'status_code': 200, 'timeout_seconds': 3}
         failed_interface.save(update_fields=['path', 'assertions'])
-        response = self.client.post(f'/api/monitor/execution-details/{detail.id}/retry/', {}, format='json')
+        response = self.client.post(
+            f'/api/monitor/execution-details/{detail.id}/retry/',
+            {'login_password': 'target-login-pass'}, format='json',
+        )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['data']['status'], 'passed')
         self.assertEqual(response.data['data']['url'], 'https://monitor.example.com/api/v1/vip/benefits/latest')

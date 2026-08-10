@@ -11,7 +11,18 @@
       </el-button>
     </div>
 
-    <div class="data-factory-grid">
+    <div class="data-factory-groups">
+      <section
+        v-if="hasAnyPermission(['data_factory.account_balance','data_factory.account_add','data_factory.member_status_activate','data_factory.member_query'])"
+        class="data-factory-group"
+      >
+        <div class="data-factory-group-head">
+          <div>
+            <h4>用户中心</h4>
+            
+          </div>
+        </div>
+        <div class="data-factory-grid">
       <button
         v-if="hasPermission('data_factory.account_balance')"
         class="data-factory-card"
@@ -37,34 +48,63 @@
       </button>
 
       <button
-        v-if="hasAnyPermission(['data_factory.order_result_push','data_factory.rollback_settlement','data_factory.bet_cancel','data_factory.rollback_bet_cancel'])"
+        v-if="hasPermission('data_factory.member_status_activate')"
         class="data-factory-card"
         type="button"
-        @click="orderResultPushVisible = true"
+        @click="memberStatusActivateVisible = true"
       >
-        <span class="data-factory-icon green"><el-icon><Promotion /></el-icon></span>
-        <strong>订单结果处理</strong>
-        <small>推送订单结果，或执行回滚结算、取消和回滚取消</small>
+        <span class="data-factory-icon green"><el-icon><CircleCheckFilled /></el-icon></span>
+        <strong>用户状态激活</strong>
+        <small>输入 member_id 激活用户状态，环境字段仅作预留</small>
         <b>可用</b>
       </button>
 
-      <article
-        v-for="item in pendingTools"
-        :key="item.name"
-        class="data-factory-card disabled"
+      <button
+        v-if="hasPermission('data_factory.member_query')"
+        class="data-factory-card"
+        type="button"
+        @click="memberQueryVisible = true"
       >
-        <span :class="['data-factory-icon', item.tone]">
-          <el-icon><component :is="item.icon" /></el-icon>
-        </span>
-        <strong>{{ item.name }}</strong>
-        <small>{{ item.summary }}</small>
-        <b>待接入</b>
-      </article>
+        <span class="data-factory-icon blue"><el-icon><UserFilled /></el-icon></span>
+        <strong>查询用户信息</strong>
+        <small>选择运行环境并按邮箱查询 UID、CPF、Member ID 和昵称</small>
+        <b>可用</b>
+      </button>
+
+        </div>
+      </section>
+
+      <section
+        v-if="hasAnyPermission(['data_factory.order_result_push','data_factory.rollback_settlement','data_factory.bet_cancel','data_factory.rollback_bet_cancel'])"
+        class="data-factory-group"
+      >
+        <div class="data-factory-group-head">
+          <div>
+            <h4>赛事活动</h4>
+            
+          </div>
+        </div>
+        <div class="data-factory-grid">
+          <button
+            class="data-factory-card"
+            type="button"
+            @click="orderResultPushVisible = true"
+          >
+            <span class="data-factory-icon green"><el-icon><Promotion /></el-icon></span>
+            <strong>订单结果推送</strong>
+            <small>推送订单结果，或执行回滚结算、取消和回滚取消</small>
+            <b>可用</b>
+          </button>
+        </div>
+      </section>
+
     </div>
   </section>
 
   <AccountBalanceTool v-model="accountBalanceVisible" :environments="environments" @executed="loadHistory" />
   <AccountAddTool v-model="accountAddVisible" :environments="environments" @executed="loadHistory" />
+  <MemberStatusActivateTool v-model="memberStatusActivateVisible" :environments="environments" @executed="loadHistory" />
+  <MemberQueryTool v-model="memberQueryVisible" :environments="environments" @executed="loadHistory" />
   <OrderResultPushTool v-model="orderResultPushVisible" @executed="loadHistory" />
 
   <el-drawer v-model="historyVisible" title="数据工厂操作记录" size="min(940px, 94vw)">
@@ -97,24 +137,22 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Brush, CirclePlusFilled, Connection, Document, Promotion, Tickets, WalletFilled } from '@element-plus/icons-vue'
+import { CircleCheckFilled, CirclePlusFilled, Document, Promotion, UserFilled, WalletFilled } from '@element-plus/icons-vue'
 import { hasPermission } from '@/auth'
 import * as api from '@/api'
 import dayjs from 'dayjs'
 import type { DataFactoryExecution, Environment } from '@/types'
 import AccountAddTool from './AccountAddTool.vue'
 import AccountBalanceTool from './AccountBalanceTool.vue'
+import MemberStatusActivateTool from './MemberStatusActivateTool.vue'
+import MemberQueryTool from './MemberQueryTool.vue'
 import OrderResultPushTool from './OrderResultPushTool.vue'
-
-const pendingTools = [
-  { name: '订单数据', summary: '构造订单、支付、退款场景', icon: Tickets, tone: 'green' },
-  { name: '接口参数', summary: '生成接口请求参数模板', icon: Connection, tone: 'amber' },
-  { name: '数据清理', summary: '整理重复、空值和脏数据', icon: Brush, tone: 'red' },
-]
 
 const environments = ref<Environment[]>([])
 const accountBalanceVisible = ref(false)
 const accountAddVisible = ref(false)
+const memberStatusActivateVisible = ref(false)
+const memberQueryVisible = ref(false)
 const orderResultPushVisible = ref(false)
 const historyVisible = ref(false)
 const historyLoading = ref(false)
@@ -169,3 +207,12 @@ onMounted(async () => {
   }
 })
 </script>
+
+<style scoped>
+.data-factory-groups { display: grid; gap: 30px; margin-top: 20px; }
+.data-factory-group + .data-factory-group { border-top: 1px solid #eaecf0; padding-top: 26px; }
+.data-factory-group-head { display: flex; align-items: center; justify-content: space-between; }
+.data-factory-group-head h4 { margin: 0 0 4px; color: #667085; font-size: 13px; font-weight: 600; }
+.data-factory-group-head p { margin: 0; color: #98a2b3; font-size: 11px; }
+.data-factory-group .data-factory-grid { margin-top: 16px; }
+</style>

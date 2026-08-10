@@ -32,8 +32,9 @@ const envForm=reactive({id:0,name:'',description:'',base_url:'',login_url:'',var
 const currentRole=ref<Role|null>(null),checkedPermissions=ref<string[]>([])
 const permissionGroups=[
   {name:'首页',items:[['home.view','查看首页']]},
-  {name:'智能工具',items:[['data_factory.view','查看数据工厂'],['data_factory.account_add','账户添加操作'],['data_factory.account_balance','账户余额操作'],['data_factory.order_result_push','订单结果推送'],['data_factory.rollback_settlement','回滚结算操作'],['data_factory.bet_cancel','取消操作'],['data_factory.rollback_bet_cancel','回滚取消操作']]},
+  {name:'智能工具',items:[['data_factory.view','查看数据工厂'],['data_factory.account_add','账户添加操作'],['data_factory.account_balance','账户余额操作'],['data_factory.member_status_activate','用户状态激活'],['data_factory.member_query','查询用户信息'],['data_factory.order_result_push','订单结果推送'],['data_factory.rollback_settlement','回滚结算操作'],['data_factory.bet_cancel','取消操作'],['data_factory.rollback_bet_cancel','回滚取消操作']]},
   {name:'自动化',items:[['automation.view','查看任务'],['automation.create','创建任务'],['automation.run','执行任务'],['automation.edit','编辑任务'],['automation.delete','删除任务']]},
+  {name:'用例管理',items:[['testcase.package.view','查看用例包'],['testcase.package.create','新建或导入用例包'],['testcase.package.edit','编辑用例包'],['testcase.package.delete','删除用例包'],['testcase.execution.view','查看用例执行']]},
   {name:'监控中心',items:[['monitor.api.view','查看监控接口'],['monitor.api.manage','管理监控接口'],['monitor.task.view','查看监控任务'],['monitor.task.manage','管理监控任务'],['monitor.task.run','执行监控任务'],['monitor.alarm.view','查看报警'],['monitor.alarm.handle','处理报警']]},
   {name:'环境配置',items:[['environment.view','查看环境'],['environment.manage','管理环境']]},
   {name:'用户管理',items:[['users.view','查看用户'],['users.manage','管理用户'],['users.status','启用或停用'],['users.delete','删除用户']]},

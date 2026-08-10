@@ -2,7 +2,8 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenRefreshView
 
-from .views import ApiInterfaceViewSet, AutomationModuleViewSet, AutomationTaskResultViewSet, AutomationTaskViewSet, DashboardView, DataFactoryAccountAddView, DataFactoryAccountBalanceView, DataFactoryBetCancelView, DataFactoryEnvironmentView, DataFactoryExecutionView, DataFactoryOrderResultPushView, DataFactoryRollbackBetCancelView, DataFactoryRollbackSettlementView, EnvironmentViewSet, LarkCallbackView, LarkLoginView, LoginView, MeEnvironmentAccountView, MeViewSet, MonitorAlarmViewSet, MonitorApiConfigViewSet, MonitorExecutionDetailViewSet, MonitorExecutionViewSet, MonitorTaskViewSet, RoleViewSet, UserViewSet
+from .views import ApiInterfaceViewSet, AutomationModuleViewSet, AutomationTaskResultViewSet, AutomationTaskViewSet, DashboardView, DataFactoryAccountAddView, DataFactoryAccountBalanceView, DataFactoryBetCancelView, DataFactoryEnvironmentView, DataFactoryExecutionView, DataFactoryMemberQueryView, DataFactoryMemberStatusActivateView, DataFactoryOrderResultPushView, DataFactoryRollbackBetCancelView, DataFactoryRollbackSettlementView, EnvironmentViewSet, LarkCallbackView, LarkLoginView, LoginView, MeEnvironmentAccountView, MeViewSet, MonitorAlarmViewSet, MonitorApiConfigViewSet, MonitorExecutionDetailViewSet, MonitorExecutionViewSet, MonitorTaskViewSet, RoleViewSet, UserViewSet
+from .testcase.views import TestCasePackageViewSet
 
 router = DefaultRouter()
 router.register('users', UserViewSet, basename='user')
@@ -10,6 +11,7 @@ router.register('roles', RoleViewSet, basename='role')
 router.register('environments', EnvironmentViewSet, basename='environment')
 router.register('automation/modules', AutomationModuleViewSet, basename='automation-module')
 router.register('interfaces', ApiInterfaceViewSet, basename='api-interface')
+router.register('testcase/packages', TestCasePackageViewSet, basename='testcase-package')
 router.register('automation/tasks', AutomationTaskViewSet, basename='automation-task')
 router.register('automation/task-results', AutomationTaskResultViewSet, basename='automation-task-result')
 router.register('monitor/interfaces', MonitorApiConfigViewSet, basename='monitor-interface')
@@ -28,6 +30,8 @@ urlpatterns = [
     path('me/environment-accounts/', MeEnvironmentAccountView.as_view(), name='me-environment-accounts'),
     path('data-factory/account-balance/', DataFactoryAccountBalanceView.as_view(), name='data-factory-account-balance'),
     path('data-factory/account-add/', DataFactoryAccountAddView.as_view(), name='data-factory-account-add'),
+    path('data-factory/member-status-activate/', DataFactoryMemberStatusActivateView.as_view(), name='data-factory-member-status-activate'),
+    path('data-factory/member-query/', DataFactoryMemberQueryView.as_view(), name='data-factory-member-query'),
     path('data-factory/order-result-push/', DataFactoryOrderResultPushView.as_view(), name='data-factory-order-result-push'),
     path('data-factory/bet-cancel/', DataFactoryBetCancelView.as_view(), name='data-factory-bet-cancel'),
     path('data-factory/rollback-bet-cancel/', DataFactoryRollbackBetCancelView.as_view(), name='data-factory-rollback-bet-cancel'),

@@ -1,6 +1,8 @@
 from django.contrib.auth.models import AbstractUser
 from django.db import models
 
+from .common.secret import decrypt_secret, encrypt_secret
+
 
 class Role(models.Model):
     name = models.CharField('角色名称', max_length=50)
@@ -161,6 +163,26 @@ class ApiInterface(models.Model):
         return f'{self.method} {self.path}'
 
 
+class TestCasePackage(models.Model):
+    name = models.CharField('用例包名称', max_length=200)
+    is_locked = models.BooleanField('是否锁定', default=False)
+    description = models.TextField('说明', blank=True, default='')
+    content = models.JSONField('用例内容', default=dict, blank=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='created_testcase_packages', verbose_name='创建人')
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'aibet_testcase_package'
+        db_table_comment = '测试用例包表'
+        verbose_name = '用例包'
+        verbose_name_plural = '用例包'
+        ordering = ['-updated_at', '-id']
+
+    def __str__(self):
+        return self.name
+
+
 class AutomationTask(models.Model):
     TYPE_CHOICES = [('api', '接口测试'), ('ui', 'UI 测试'), ('scenario', '场景测试')]
     STATUS_CHOICES = [('pending', '待执行'), ('running', '执行中'), ('passed', '已通过'), ('failed', '失败')]
@@ -191,7 +213,6 @@ class AutomationTask(models.Model):
 
     def __str__(self):
         return self.name
-
 
 class AutomationTaskResult(models.Model):
     STATUS_CHOICES = [('pending', '待执行'), ('running', '执行中'), ('passed', '已通过'), ('failed', '失败')]
@@ -269,6 +290,7 @@ class MonitorTask(models.Model):
     enabled = models.BooleanField('启用状态', default=True)
     status = models.CharField('最近执行状态', max_length=20, choices=STATUS_CHOICES, default='pending')
     notification = models.JSONField('通知配置', default=dict, blank=True)
+    login_password_encrypted = models.TextField('目标系统登录密码（加密）', blank=True, default='')
     last_run_time = models.DateTimeField('最近执行时间', null=True, blank=True)
     next_run_time = models.DateTimeField('下次执行时间', null=True, blank=True)
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='created_monitor_tasks', verbose_name='创建人')
@@ -284,6 +306,12 @@ class MonitorTask(models.Model):
 
     def __str__(self):
         return self.name
+
+    def set_login_password(self, value):
+        self.login_password_encrypted = encrypt_secret(value)
+
+    def get_login_password(self):
+        return decrypt_secret(self.login_password_encrypted)
 
 
 class MonitorExecution(models.Model):

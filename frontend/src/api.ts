@@ -1,7 +1,7 @@
 import axios from 'axios'
 import { clearAuth, auth } from './auth'
 import router from './router'
-import type { AccountAddResult, AccountBalanceResult, ApiInterface, ApiResponse, AutomationModule, AutomationTask, AutomationTaskResult, DashboardStats, DataFactoryExecution, Environment, EnvironmentAccountSettings, LoginResult, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorTask, OrderResultPushResult, PageResult, Role, User } from './types'
+import type { AccountAddResult, AccountBalanceResult, ApiInterface, ApiResponse, AutomationModule, AutomationTask, AutomationTaskResult, DashboardStats, DataFactoryExecution, Environment, EnvironmentAccountSettings, LoginResult, MemberQueryResult, MemberStatusActivateResult, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorTask, OrderResultPushResult, PageResult, Role, TestCasePackage, User } from './types'
 
 const request = axios.create({ baseURL:'/api', timeout:15000 })
 request.interceptors.request.use(config => { if (auth.token) config.headers.Authorization = `Bearer ${auth.token}`; return config })
@@ -17,6 +17,8 @@ export const saveMyEnvironmentAccounts = (accounts:{environment_id:number;accoun
 export const getDashboard = () => request.get<never,ApiResponse<DashboardStats>>('/dashboard/')
 export const executeAccountBalance = (data:{environment:number;email:string;amount:number}) => request.post<never,ApiResponse<AccountBalanceResult>>('/data-factory/account-balance/',data)
 export const executeAccountAdd = (data:{frontend_environment:number;backend_environment:number;email:string;amount:number|null;quantity:number}) => request.post<never,ApiResponse<AccountAddResult>>('/data-factory/account-add/',data)
+export const activateMemberStatus = (data:{environment:number;member_id:string}) => request.post<never,ApiResponse<MemberStatusActivateResult>>('/data-factory/member-status-activate/',data)
+export const queryMemberInfo = (data:{environment:number;email:string}) => request.post<never,ApiResponse<MemberQueryResult>>('/data-factory/member-query/',data)
 export const pushOrderResult = (data:Record<string,string|number>) => request.post<never,ApiResponse<OrderResultPushResult>>('/data-factory/order-result-push/',data)
 export const cancelBet = (data:{product:string|number;event_id:string;market_id:string|number;specifiers?:string;start_time?:string;end_time?:string;timestamp?:number|string}) => request.post<never,ApiResponse<OrderResultPushResult>>('/data-factory/bet-cancel/',data)
 export const rollbackBetCancel = (data:{product:string|number;event_id:string;market_id:string|number;specifiers?:string;start_time?:string;end_time?:string;timestamp?:number|string}) => request.post<never,ApiResponse<OrderResultPushResult>>('/data-factory/rollback-bet-cancel/',data)
@@ -42,6 +44,12 @@ export const copyEnvironment = (id:number) => request.post<never,ApiResponse<Env
 export const setDefaultEnvironment = (id:number) => request.post<never,ApiResponse<Environment>>(`/environments/${id}/default/`,{})
 export const getAutomationModules = (params:Record<string,unknown>={}) => request.get<never,ApiResponse<AutomationModule[]>>('/automation/modules/',{params})
 export const getInterfaces = (params:Record<string,unknown>={}) => request.get<never,ApiResponse<PageResult<ApiInterface>>>('/interfaces/',{params})
+export const getTestCasePackages = (params:Record<string,unknown>={}) => request.get<never,ApiResponse<PageResult<TestCasePackage>>>('/testcase/packages/',{params})
+export const getTestCasePackage = (id:number) => request.get<never,ApiResponse<TestCasePackage>>(`/testcase/packages/${id}/`)
+export const createTestCasePackage = (data:Record<string,unknown>) => request.post<never,ApiResponse<TestCasePackage>>('/testcase/packages/',data)
+export const saveTestCasePackage = (data:Record<string,unknown>) => request.post<never,ApiResponse<TestCasePackage>>('/testcase/packages/save/',data)
+export const deleteTestCasePackage = (id:number) => request.delete<never,ApiResponse<null>>(`/testcase/packages/${id}/`)
+export const importTestCasePackageXMind = (file:File) => { const formData=new FormData(); formData.append('file',file); return request.post<never,ApiResponse<TestCasePackage>>('/testcase/packages/import-xmind/',formData) }
 export const batchImportInterfaces = (data:{text:string;module_name?:string}) => request.post<never,ApiResponse<{imported:{id:number;name:string}[];skipped:{name:string;message:string}[];failed:{name:string;message:string}[];total:number}>>('/interfaces/batch-import/',data)
 export const createInterface = (data:Record<string,unknown>) => request.post<never,ApiResponse<ApiInterface>>('/interfaces/',data)
 export const updateInterface = (id:number,data:Record<string,unknown>) => request.patch<never,ApiResponse<ApiInterface>>(`/interfaces/${id}/`,data)
@@ -63,9 +71,9 @@ export const createMonitorTask = (data:Record<string,unknown>) => request.post<n
 export const updateMonitorTask = (id:number,data:Record<string,unknown>) => request.patch<never,ApiResponse<MonitorTask>>(`/monitor/tasks/${id}/`,data)
 export const deleteMonitorTask = (id:number) => request.delete<never,ApiResponse<null>>(`/monitor/tasks/${id}/`)
 export const toggleMonitorTask = (id:number,enabled:boolean) => request.post<never,ApiResponse<MonitorTask>>(`/monitor/tasks/${id}/toggle/`,{enabled})
-export const runMonitorTask = (id:number) => request.post<never,ApiResponse<MonitorExecution>>(`/monitor/tasks/${id}/run/`,{})
+export const runMonitorTask = (id:number,loginPassword:string) => request.post<never,ApiResponse<MonitorExecution>>(`/monitor/tasks/${id}/run/`,{login_password:loginPassword})
 export const getMonitorTaskHistory = (id:number,params:Record<string,unknown>={}) => request.get<never,ApiResponse<PageResult<MonitorExecution>>>(`/monitor/tasks/${id}/history/`,{params})
 export const getMonitorExecutions = (params:Record<string,unknown>={}) => request.get<never,ApiResponse<PageResult<MonitorExecution>>>('/monitor/executions/',{params})
-export const retryMonitorExecutionDetail = (id:number) => request.post<never,ApiResponse<MonitorExecutionDetail>>(`/monitor/execution-details/${id}/retry/`,{})
+export const retryMonitorExecutionDetail = (id:number,loginPassword:string) => request.post<never,ApiResponse<MonitorExecutionDetail>>(`/monitor/execution-details/${id}/retry/`,{login_password:loginPassword})
 export const getMonitorAlarms = (params:Record<string,unknown>={}) => request.get<never,ApiResponse<PageResult<MonitorAlarm>>>('/monitor/alarms/',{params})
 export const updateMonitorAlarm = (id:number,data:Record<string,unknown>) => request.patch<never,ApiResponse<MonitorAlarm>>(`/monitor/alarms/${id}/`,data)

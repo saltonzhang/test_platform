@@ -2,6 +2,19 @@ import base64
 import json
 
 from ..executor import api_request_executor
+from ..models import UserEnvironmentAccount
+
+
+def get_user_environment_account(user, environment):
+    """Return the target-system account configured for a platform user/environment."""
+    if not user or not environment:
+        return ''
+    return (
+        UserEnvironmentAccount.objects.filter(user=user, environment=environment)
+        .values_list('account', flat=True)
+        .first()
+        or ''
+    ).strip()
 
 
 def get_login_parameter_names(environment):
@@ -63,4 +76,3 @@ def extract_token_user_id(token):
         return str(data.get('ID') or data.get('id') or data.get('userId') or '')
     except (IndexError, TypeError, ValueError, UnicodeDecodeError):
         return ''
-

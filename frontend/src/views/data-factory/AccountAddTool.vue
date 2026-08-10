@@ -28,7 +28,7 @@
           <el-row :gutter="16">
             <el-col :xs="24" :sm="12">
               <el-form-item label="前台运行环境" prop="frontend_environment">
-                <el-select v-model="form.frontend_environment" clearable placeholder="请选择前台环境" style="width: 100%">
+                <el-select v-model="form.frontend_environment" clearable placeholder="请选择前台环境" style="width: 100%" @change="markFrontendSelection">
                   <el-option
                     v-for="env in environmentOptions"
                     :key="env.id"
@@ -41,7 +41,7 @@
 
             <el-col :xs="24" :sm="12">
               <el-form-item label="后台运行环境" prop="backend_environment">
-                <el-select v-model="form.backend_environment" clearable placeholder="请选择后台环境" style="width: 100%">
+                <el-select v-model="form.backend_environment" clearable placeholder="请选择后台环境" style="width: 100%" @change="markBackendSelection">
                   <el-option
                     v-for="env in environmentOptions"
                     :key="env.id"
@@ -150,6 +150,8 @@ const resultState = ref<'idle' | 'running' | 'passed' | 'failed'>('idle')
 const generatedEmails = ref<string[]>([])
 const currentExecutionId = ref<number | null>(null)
 const refreshing = ref(false)
+const frontendDefaultPending = ref(true)
+const backendDefaultPending = ref(true)
 const form = reactive<{
   frontend_environment: number | null
   backend_environment: number | null
@@ -222,13 +224,35 @@ const rules: FormRules = {
 function syncSelections() {
   if (form.frontend_environment && !environmentOptions.value.some((item) => item.id === form.frontend_environment)) {
     form.frontend_environment = null
+    frontendDefaultPending.value = true
   }
   if (form.backend_environment && !environmentOptions.value.some((item) => item.id === form.backend_environment)) {
     form.backend_environment = null
+    backendDefaultPending.value = true
+  }
+  if (frontendDefaultPending.value && !form.frontend_environment) {
+    form.frontend_environment = findEnvironmentId(['前台测试环境', '前端测试环境'])
+  }
+  if (backendDefaultPending.value && !form.backend_environment) {
+    form.backend_environment = findEnvironmentId(['后台测试环境'])
   }
 }
 
+function findEnvironmentId(names: string[]) {
+  return environmentOptions.value.find((item) => names.includes(item.name))?.id ?? null
+}
+
+function markFrontendSelection() {
+  frontendDefaultPending.value = false
+}
+
+function markBackendSelection() {
+  backendDefaultPending.value = false
+}
+
 function resetForm() {
+  frontendDefaultPending.value = true
+  backendDefaultPending.value = true
   form.frontend_environment = null
   form.backend_environment = null
   form.email = ''
@@ -284,6 +308,7 @@ watch(environmentOptions, syncSelections, { immediate: true })
 watch(visible, (isVisible) => {
   if (isVisible) {
     resetForm()
+    syncSelections()
   } else {
     resetResultPanel()
   }
