@@ -1,6 +1,7 @@
 import json
 import secrets
 import time
+import uuid
 from datetime import timedelta
 from decimal import Decimal
 from urllib.parse import urlencode, urljoin, urlsplit
@@ -217,7 +218,7 @@ def extract_login_user_id(response_log, token):
     return extract_token_user_id(token)
 
 
-def get_kyc_url(environment, token):
+def get_kyc_url(environment, token, device_id=None):
     print('\n================ [获取 KYC URL 认证接口] ================')
     kyc_api_url = _url(getattr(environment, 'base_url', ''), '/api/v1/member/getKycUrl')
     current_ts = int(time.time())
@@ -232,7 +233,7 @@ def get_kyc_url(environment, token):
             'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36'
         ),
         'x-chan': '0',
-        'x-device-id': '18b225ed-c2e0-4fa3-b821-966271680942',
+        'x-device-id': str(device_id or uuid.uuid4()),
         'x-lang': 'en',
         'x-nonce': '4wMqKl',
         'x-platform': 'WEB',
@@ -488,6 +489,8 @@ def _run_single_account(frontend_environment, backend_environment, email='', amo
 
             current_ts = int(time.time())
             email_identifier = email_clean if email_clean else f'test{current_ts}@test.com'
+            # 每个压测账号必须具有独立设备标识；复用固定值会触发 Referral 的老用户/刷量判定。
+            device_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f'aibet-data-factory:{email_identifier}'))
             print(f'生成的 CPF (idNumber): {id_number}')
             print(f'使用的账号邮箱 (email/identifier): {email_identifier}')
 
@@ -502,7 +505,7 @@ def _run_single_account(frontend_environment, backend_environment, email='', amo
                     'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36'
                 ),
                 'x-chan': '0',
-                'x-device-id': '18b225ed-c2e0-4fa3-b821-966271680942',
+                'x-device-id': device_id,
                 'x-lang': 'en',
                 'x-nonce': 'hEIT38',
                 'x-platform': 'WEB',
@@ -566,7 +569,7 @@ def _run_single_account(frontend_environment, backend_environment, email='', amo
                 if not user_token:
                     continue
 
-            get_kyc_url(frontend_environment, user_token)
+            get_kyc_url(frontend_environment, user_token, device_id=device_id)
             print('\n⏳ 正在等待数据库写入 KYC 记录 (延时 2 秒)...')
             time.sleep(2)
 
