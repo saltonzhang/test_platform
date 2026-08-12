@@ -7,34 +7,28 @@
         </span>
         <div>
           <h3>用户状态激活</h3>
-          <p>输入 member_id 激活用户状态。运行环境仅作预留，不参与当前数据库选择。</p>
+          <p>选择环境包并输入邮箱激活用户状态。</p>
         </div>
       </div>
 
       <el-alert
-        title="当前环境字段仅保留给后续按环境切库使用，现阶段仍连接默认数据工厂数据库。"
+        title="系统会使用所选环境包中的后台配置执行。"
         type="info"
         :closable="false"
         show-icon
       />
 
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top" class="member-query-form">
-        <el-form-item label="运行环境" prop="environment">
-          <el-select v-model="form.environment" clearable placeholder="请选择运行环境" style="width: 100%">
-            <el-option
-              v-for="env in environmentOptions"
-              :key="env.id"
-              :label="env.name"
-              :value="env.id"
-            />
+        <el-form-item label="环境包" prop="environment_package">
+          <el-select v-model="form.environment_package" clearable placeholder="请选择环境包" style="width: 100%">
+            <el-option v-for="pkg in environmentPackages" :key="pkg.id" :label="pkg.name" :value="pkg.id" />
           </el-select>
         </el-form-item>
-        <el-form-item label="Member ID" prop="member_id">
+        <el-form-item label="会员邮箱" prop="email">
           <el-input
-            v-model="form.member_id"
+            v-model="form.email"
             clearable
-            placeholder="请输入 member_id"
-            inputmode="numeric"
+            placeholder="请输入会员邮箱"
           />
         </el-form-item>
       </el-form>
@@ -58,7 +52,7 @@
           show-icon
         />
         <el-descriptions :column="1" border>
-          <el-descriptions-item label="运行环境（预留）">{{ result.environment_name }}</el-descriptions-item>
+          <el-descriptions-item label="后台环境">{{ result.environment_name }}</el-descriptions-item>
           <el-descriptions-item label="Member ID">{{ result.member_id }}</el-descriptions-item>
           <el-descriptions-item label="影响行数">{{ result.affected_rows }}</el-descriptions-item>
           <el-descriptions-item label="执行结果">{{ result.status === 'passed' ? '已完成' : result.status }}</el-descriptions-item>
@@ -69,55 +63,44 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { CircleCheckFilled, RefreshLeft } from '@element-plus/icons-vue'
 import * as api from '@/api'
-import type { Environment, MemberStatusActivateResult } from '@/types'
+import type { EnvironmentPackage, MemberStatusActivateResult } from '@/types'
 
 const visible = defineModel<boolean>({ default: false })
-const props = defineProps<{ environments: Environment[] }>()
+const props = defineProps<{ environmentPackages: EnvironmentPackage[] }>()
 const emit = defineEmits<{ executed: [] }>()
 
 const formRef = ref<FormInstance>()
 const submitting = ref(false)
 const result = ref<MemberStatusActivateResult | null>(null)
-const form = reactive<{ environment: number | null; member_id: string }>({
-  environment: null,
-  member_id: '',
+const form = reactive<{ environment_package: number | null; email: string }>({
+  environment_package: null,
+  email: '',
 })
 
-const environmentOptions = computed(() => props.environments)
 const rules: FormRules = {
-  environment: [{ required: true, message: '请选择运行环境' }],
-  member_id: [
-    { required: true, message: '请输入 member_id' },
-    { pattern: /^\d+$/, message: 'member_id 必须是数字' },
-  ],
+  environment_package: [{ required: true, message: '请选择环境包' }],
+  email: [{ required: true, message: '请输入会员邮箱' }, { type: 'email', message: '邮箱格式不正确' }],
 }
 
 function resetForm() {
-  form.environment = null
-  form.member_id = ''
+  form.environment_package = null
+  form.email = ''
   result.value = null
   formRef.value?.clearValidate()
 }
 
-watch(environmentOptions, (options) => {
-  if (form.environment && !options.some((item) => item.id === form.environment)) {
-    form.environment = null
-  }
-  if (!form.environment && options.length) {
-    form.environment = options[0].id
-  }
+watch(() => props.environmentPackages, (packages) => {
+  if (form.environment_package && !packages.some(item => item.id === form.environment_package)) form.environment_package = null
+  if (!form.environment_package && packages.length) form.environment_package = packages[0].id
 }, { immediate: true })
 
 watch(visible, (isVisible) => {
   if (isVisible) {
     resetForm()
-    if (environmentOptions.value.length) {
-      form.environment = environmentOptions.value[0].id
-    }
   }
 })
 
@@ -125,14 +108,14 @@ async function submit() {
   if (!(await formRef.value?.validate().catch(() => false))) {
     return
   }
-  if (!form.environment) {
-    ElMessage.warning('请选择运行环境')
+  if (!form.environment_package) {
+    ElMessage.warning('请选择环境包')
     return
   }
-  const environmentName = environmentOptions.value.find((item) => item.id === form.environment)?.name || String(form.environment)
+  const environmentName = props.environmentPackages.find(item => item.id === form.environment_package)?.name || String(form.environment_package)
   try {
     await ElMessageBox.confirm(
-      `确认在「${environmentName}」环境下激活 member_id ${form.member_id} 的用户状态吗？`,
+      `确认在「${environmentName}」环境下激活邮箱 ${form.email} 的用户状态吗？`,
       '确认用户状态激活',
       { type: 'warning', confirmButtonText: '确认执行' },
     )
@@ -146,8 +129,8 @@ async function submit() {
   submitting.value = true
   try {
     const response = await api.activateMemberStatus({
-      environment: form.environment,
-      member_id: form.member_id.trim(),
+      environment_package: form.environment_package,
+      email: form.email.trim(),
     })
     result.value = response.data
     emit('executed')

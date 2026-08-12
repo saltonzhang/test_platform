@@ -7,23 +7,18 @@
         </span>
         <div>
           <h3>查询用户信息</h3>
-          <p>选择环境并输入邮箱，查询会员基础信息。</p>
+          <p>选择环境包并输入邮箱或昵称，查询会员基础信息。</p>
         </div>
       </div>
 
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top" class="member-query-form">
-        <el-form-item label="运行环境" prop="environment">
-          <el-select v-model="form.environment" clearable placeholder="请选择运行环境" style="width: 100%">
-            <el-option
-              v-for="env in environmentOptions"
-              :key="env.id"
-              :label="env.name"
-              :value="env.id"
-            />
+        <el-form-item label="环境包" prop="environment_package">
+          <el-select v-model="form.environment_package" clearable placeholder="请选择环境包" style="width: 100%">
+            <el-option v-for="pkg in environmentPackages" :key="pkg.id" :label="pkg.name" :value="pkg.id" />
           </el-select>
         </el-form-item>
-        <el-form-item label="邮箱" prop="email">
-          <el-input v-model="form.email" clearable placeholder="请输入邮箱" />
+        <el-form-item label="邮箱或昵称" prop="keyword">
+          <el-input v-model="form.keyword" clearable placeholder="请输入邮箱或昵称" />
         </el-form-item>
       </el-form>
 
@@ -46,14 +41,14 @@
           <el-descriptions-item label="邮箱">
             <span class="member-query-copyable" title="双击复制" @dblclick.prevent="copyText(result.email, '邮箱')">{{ result.email }}</span>
           </el-descriptions-item>
-          <el-descriptions-item label="UID">
-            <span class="member-query-copyable" title="双击复制" @dblclick.prevent="copyText(result.uid, 'UID')">{{ result.uid }}</span>
+          <el-descriptions-item label="UUID">
+            <span class="member-query-copyable" title="双击复制" @dblclick.prevent="copyText(result.uid, 'UUID')">{{ result.uid }}</span>
           </el-descriptions-item>
-          <el-descriptions-item label="CPF">
-            <span class="member-query-copyable" title="双击复制" @dblclick.prevent="copyText(result.cpf, 'CPF')">{{ result.cpf }}</span>
+          <el-descriptions-item label="ID Number">
+            <span class="member-query-copyable" title="双击复制" @dblclick.prevent="copyText(result.cpf, 'ID Number')">{{ result.cpf }}</span>
           </el-descriptions-item>
-          <el-descriptions-item label="Member ID">
-            <span class="member-query-copyable" title="双击复制" @dblclick.prevent="copyText(result.member_id, 'Member ID')">{{ result.member_id }}</span>
+          <el-descriptions-item label="ID">
+            <span class="member-query-copyable" title="双击复制" @dblclick.prevent="copyText(result.member_id, 'ID')">{{ result.member_id }}</span>
           </el-descriptions-item>
           <el-descriptions-item label="昵称">
             <span class="member-query-copyable" title="双击复制" @dblclick.prevent="copyText(result.nickname, '昵称')">{{ result.nickname }}</span>
@@ -66,68 +61,36 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { reactive, ref, watch } from 'vue'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { RefreshLeft, Search, UserFilled } from '@element-plus/icons-vue'
 import * as api from '@/api'
-import type { Environment, MemberQueryResult } from '@/types'
+import type { EnvironmentPackage, MemberQueryResult } from '@/types'
 
 const visible = defineModel<boolean>({ default: false })
-const props = defineProps<{ environments: Environment[] }>()
+const props = defineProps<{ environmentPackages: EnvironmentPackage[] }>()
 const emit = defineEmits<{ executed: [] }>()
 
 const formRef = ref<FormInstance>()
 const submitting = ref(false)
 const searched = ref(false)
 const result = ref<MemberQueryResult | null>(null)
-const preferredEnvironmentNames = ['前端测试环境', '前台测试环境', '测试环境']
-const shouldApplyDefaultEnvironment = ref(true)
-const form = reactive<{ environment: number | null; email: string }>({
-  environment: null,
-  email: '',
+const form = reactive<{ environment_package: number | null; keyword: string }>({
+  environment_package: null,
+  keyword: '',
 })
 
-const environmentOptions = computed(() => props.environments)
 const rules: FormRules = {
-  environment: [{ required: true, message: '请选择运行环境' }],
-  email: [
-    { required: true, message: '请输入邮箱' },
-    { type: 'email', message: '邮箱格式不正确' },
-  ],
+  environment_package: [{ required: true, message: '请选择环境包' }],
+  keyword: [{ required: true, message: '请输入邮箱或昵称' }],
 }
 
 function resetForm() {
-  shouldApplyDefaultEnvironment.value = true
-  form.environment = null
-  form.email = ''
+  form.environment_package = null
+  form.keyword = ''
   result.value = null
   searched.value = false
   formRef.value?.clearValidate()
-}
-
-function getDefaultEnvironmentId(options: Environment[]) {
-  for (const preferredName of preferredEnvironmentNames) {
-    const matched = options.find((item) => item.name === preferredName)
-    if (matched) {
-      return matched.id
-    }
-  }
-  return options[0]?.id ?? null
-}
-
-function syncDefaultEnvironment(options = environmentOptions.value) {
-  if (!options.length) {
-    return
-  }
-  if (form.environment && options.some((item) => item.id === form.environment)) {
-    shouldApplyDefaultEnvironment.value = false
-    return
-  }
-  if (!form.environment && !shouldApplyDefaultEnvironment.value) {
-    return
-  }
-  form.environment = getDefaultEnvironmentId(options)
-  shouldApplyDefaultEnvironment.value = false
 }
 
 async function copyText(text: string, label: string) {
@@ -159,18 +122,14 @@ async function copyText(text: string, label: string) {
   }
 }
 
-watch(environmentOptions, (options) => {
-  if (form.environment && !options.some((item) => item.id === form.environment)) {
-    form.environment = null
-    shouldApplyDefaultEnvironment.value = true
-  }
-  syncDefaultEnvironment(options)
+watch(() => props.environmentPackages, (packages) => {
+  if (form.environment_package && !packages.some((item) => item.id === form.environment_package)) form.environment_package = null
+  if (!form.environment_package && packages.length) form.environment_package = packages[0].id
 }, { immediate: true })
 
 watch(visible, (isVisible) => {
   if (isVisible) {
     resetForm()
-    syncDefaultEnvironment()
   }
 })
 
@@ -178,17 +137,14 @@ async function submit() {
   if (!(await formRef.value?.validate().catch(() => false))) {
     return
   }
-  if (!form.environment) {
-    ElMessage.warning('请选择运行环境')
+  if (!form.environment_package) {
+    ElMessage.warning('请选择环境包')
     return
   }
   submitting.value = true
   searched.value = false
   try {
-    const response = await api.queryMemberInfo({
-      environment: form.environment,
-      email: form.email.trim(),
-    })
+    const response = await api.queryMemberInfo({ environment_package: form.environment_package, keyword: form.keyword.trim() })
     result.value = response.data
     searched.value = true
     emit('executed')

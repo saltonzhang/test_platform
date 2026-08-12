@@ -3,10 +3,12 @@ export interface PageResult<T> { list: T[]; total: number; page: number; pageSiz
 export interface Role { id:number; name:string; code:string; description:string; permissions:string[]; is_system:boolean; user_count:number; created_at:string }
 export interface User { id:number; username:string; name:string; email:string; role:string; role_name:string; permissions:string[]; is_active:boolean; created_at:string }
 export interface EnvironmentVariable { key:string; value:string; description?:string }
-export interface Environment { id:number; name:string; description:string; base_url:string; login_url:string; variables:EnvironmentVariable[]; is_default:boolean; created_at:string }
-export interface EnvironmentAccount { environment_id:number; environment_name:string; account:string }
+export interface Environment { id:number; name:string; description:string; base_url:string; login_url:string; variables:EnvironmentVariable[]; is_default:boolean; package?:number|null; created_at:string }
+export interface EnvironmentPackage { id:number; name:string; package_type:string; description:string; environments:Environment[]; created_at:string }
+export interface EnvironmentAccount { environment_id:number; environment_name:string; environment_package_id:number|null; environment_package_name:string; account:string }
 export interface EnvironmentAccountOption { id:number; name:string }
-export interface EnvironmentAccountSettings { accounts:EnvironmentAccount[]; environments:EnvironmentAccountOption[] }
+export interface EnvironmentAccountPackageOption { id:number; name:string; environments:EnvironmentAccountOption[] }
+export interface EnvironmentAccountSettings { accounts:EnvironmentAccount[]; environment_packages:EnvironmentAccountPackageOption[] }
 export interface LoginResult { access:string; refresh:string; user:User }
 export interface AccountBalanceResult { environment_name:string; email:string; member_id:string; amount:string; adjustment_id:string; status:string }
 export interface AccountAddResult { execution_id?:number; environment_name:string; frontend_environment_name:string; backend_environment_name:string; email:string; amount:string; quantity:number; status:string; member_id?:string; adjustment_id?:string }

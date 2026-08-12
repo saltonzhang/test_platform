@@ -44,6 +44,18 @@ class User(AbstractUser):
         verbose_name_plural = '用户'
 
 
+class EnvironmentPackage(models.Model):
+    name = models.CharField('环境包名称', max_length=100, unique=True)
+    package_type = models.CharField('包类型', max_length=30, default='custom')
+    description = models.TextField('描述', blank=True, default='')
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'aibet_environment_package'
+        ordering = ['-created_at', 'id']
+
+
 class Environment(models.Model):
     name = models.CharField('环境名称', max_length=100, unique=True)
     description = models.TextField('描述', blank=True, default='')
@@ -51,6 +63,7 @@ class Environment(models.Model):
     login_url = models.URLField('登录地址', max_length=500, blank=True, default='')
     variables = models.JSONField('环境变量', default=list, blank=True)
     is_default = models.BooleanField('默认环境', default=False)
+    package = models.ForeignKey(EnvironmentPackage, on_delete=models.SET_NULL, null=True, blank=True, related_name='environments', verbose_name='环境包')
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
     updated_at = models.DateTimeField('更新时间', auto_now=True)
 

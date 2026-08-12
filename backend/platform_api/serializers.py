@@ -6,7 +6,7 @@ from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
 
 from .constants import BUSINESS_MODULE_NAMES
-from .models import ApiInterface, AutomationModule, AutomationTask, AutomationTaskResult, DataFactoryExecution, Environment, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorTask, Role, TestCasePackage, User
+from .models import ApiInterface, AutomationModule, AutomationTask, AutomationTaskResult, DataFactoryExecution, Environment, EnvironmentPackage, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorTask, Role, TestCasePackage, User
 
 ALLOWED_PERMISSIONS = {
     'home.view',
@@ -155,7 +155,7 @@ class PermissionSerializer(serializers.Serializer):
 class EnvironmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Environment
-        fields = ['id', 'name', 'description', 'base_url', 'login_url', 'variables', 'is_default', 'created_at', 'updated_at']
+        fields = ['id', 'name', 'description', 'base_url', 'login_url', 'variables', 'is_default', 'package', 'created_at', 'updated_at']
         read_only_fields = ['id', 'created_at', 'updated_at']
 
     def validate_variables(self, value):
@@ -164,6 +164,26 @@ class EnvironmentSerializer(serializers.ModelSerializer):
         for item in value:
             if not isinstance(item, dict) or not item.get('key'):
                 raise serializers.ValidationError('每个环境变量都必须包含 key')
+        return value
+
+
+class EnvironmentPackageSerializer(serializers.ModelSerializer):
+    environments = EnvironmentSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = EnvironmentPackage
+        fields = ['id', 'name', 'package_type', 'description', 'environments', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'environments', 'created_at', 'updated_at']
+
+    def validate_name(self, value):
+        value = value.strip()
+        query = EnvironmentPackage.objects.filter(name=value)
+        if self.instance:
+            query = query.exclude(pk=self.instance.pk)
+        if query.exists():
+            raise serializers.ValidationError('环境包名称已存在，请更换名称')
+        if not value:
+            raise serializers.ValidationError('请输入环境包名称')
         return value
 
 
@@ -500,6 +520,20 @@ class AutomationTaskSerializer(serializers.ModelSerializer):
     # Automation passwords are used only for the create-and-run request. They
     # are deliberately accepted as write-only input and never persisted.
     login_password = serializers.CharField(write_only=True, required=False, allow_blank=True, trim_whitespace=False)
+    environment_package = serializers.PrimaryKeyRelatedField(queryset=EnvironmentPackage.objects.prefetch_related('environments'), write_only=True, required=False)
+
+    def apply_environment_package(self, attrs, app):
+        package = attrs.get('environment_package')
+        if not package:
+            if not self.instance and not attrs.get('environment'):
+                raise serializers.ValidationError({'environment_package': '请选择环境包'})
+            return
+        marker = ('前台', '前端') if app == 'frontend' else ('后台',)
+        environments = [environment for environment in package.environments.all() if any(value in environment.name for value in marker)]
+        if len(environments) != 1:
+            label = '前台或前端' if app == 'frontend' else '后台'
+            raise serializers.ValidationError({'environment_package': f'环境包“{package.name}”需要且只能配置一个名称带“{label}”的环境'})
+        attrs['environment'] = environments[0]
 
     def get_modules(self, obj):
         return list(obj.modules.all())
@@ -544,8 +578,9 @@ class AutomationTaskSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = AutomationTask
-        fields = ['id', 'name', 'module', 'module_ids', 'interface_ids', 'module_names', 'app', 'app_name', 'module_name', 'task_type', 'task_type_name', 'environment', 'environment_name', 'status', 'status_name', 'schedule', 'owner', 'owner_name', 'notification_status', 'notification_message', 'notified_at', 'interface_count', 'failure_count', 'execution_details', 'login_password', 'created_at', 'updated_at']
+        fields = ['id', 'name', 'module', 'module_ids', 'interface_ids', 'module_names', 'app', 'app_name', 'module_name', 'task_type', 'task_type_name', 'environment', 'environment_package', 'environment_name', 'status', 'status_name', 'schedule', 'owner', 'owner_name', 'notification_status', 'notification_message', 'notified_at', 'interface_count', 'failure_count', 'execution_details', 'login_password', 'created_at', 'updated_at']
         read_only_fields = ['id', 'module_names', 'app', 'app_name', 'module_name', 'environment_name', 'owner_name', 'task_type_name', 'status_name', 'notification_status', 'notification_message', 'notified_at', 'interface_count', 'failure_count', 'execution_details', 'created_at', 'updated_at']
+        extra_kwargs = {'environment': {'required': False}}
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
@@ -579,6 +614,7 @@ class AutomationTaskSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({'interface_ids': '场景测试接口的业务模块不存在'})
             attrs['_interfaces'] = interfaces
             attrs['_modules'] = modules
+            self.apply_environment_package(attrs, interface_app)
             return attrs
         modules = attrs.get('modules')
         if self.instance:
@@ -588,13 +624,18 @@ class AutomationTaskSerializer(serializers.ModelSerializer):
             modules = modules or ([attrs.get('module')] if attrs.get('module') else [])
         if not modules:
             raise serializers.ValidationError({'module_ids': '请选择至少一个业务模块'})
+        apps = {module.app for module in modules}
+        if len(apps) != 1:
+            raise serializers.ValidationError({'module_ids': '业务模块必须归属同一所属端'})
         attrs['_modules'] = modules
+        self.apply_environment_package(attrs, next(iter(apps)))
         return attrs
 
     def create(self, validated_data):
         # The view passes this value to the one-time create execution. Keep it
         # out of the AutomationTask row entirely.
         validated_data.pop('login_password', None)
+        validated_data.pop('environment_package', None)
         modules = validated_data.pop('_modules', validated_data.pop('modules', []))
         interfaces = validated_data.pop('_interfaces', validated_data.pop('interfaces', []))
         validated_data.pop('modules', None)
@@ -607,6 +648,7 @@ class AutomationTaskSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         validated_data.pop('login_password', None)
+        validated_data.pop('environment_package', None)
         modules = validated_data.pop('_modules', None)
         interfaces = validated_data.pop('_interfaces', None)
         validated_data.pop('modules', None)
@@ -660,11 +702,13 @@ class MonitorTaskSerializer(serializers.ModelSerializer):
     latest_execution = serializers.SerializerMethodField()
     login_password = serializers.CharField(write_only=True, required=False, allow_blank=True, trim_whitespace=False)
     password_configured = serializers.SerializerMethodField()
+    environment_package = serializers.PrimaryKeyRelatedField(queryset=EnvironmentPackage.objects.prefetch_related('environments'), write_only=True, required=False)
 
     class Meta:
         model = MonitorTask
-        fields = ['id', 'name', 'module_name', 'api_type', 'environment', 'environment_name', 'api_config_ids', 'automation_interface_ids', 'api_count', 'interval_value', 'interval_unit', 'interval_unit_name', 'enabled', 'status', 'status_name', 'failure_count', 'latest_execution', 'notification', 'login_password', 'password_configured', 'last_run_time', 'next_run_time', 'created_by', 'created_by_name', 'created_at', 'updated_at']
+        fields = ['id', 'name', 'module_name', 'api_type', 'environment', 'environment_package', 'environment_name', 'api_config_ids', 'automation_interface_ids', 'api_count', 'interval_value', 'interval_unit', 'interval_unit_name', 'enabled', 'status', 'status_name', 'failure_count', 'latest_execution', 'notification', 'login_password', 'password_configured', 'last_run_time', 'next_run_time', 'created_by', 'created_by_name', 'created_at', 'updated_at']
         read_only_fields = ['id', 'environment_name', 'api_count', 'status', 'status_name', 'failure_count', 'latest_execution', 'last_run_time', 'next_run_time', 'created_by', 'created_by_name', 'created_at', 'updated_at']
+        extra_kwargs = {'environment': {'required': False}}
 
     def get_api_count(self, obj):
         monitor_total = sum(len(item.source_interface_ids or [item.source_interface_id] if item.source_interface_id else []) for item in obj.api_configs.all())
@@ -683,6 +727,7 @@ class MonitorTaskSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         login_password = validated_data.pop('login_password', '')
+        validated_data.pop('environment_package', None)
         task = super().create(validated_data)
         if login_password:
             task.set_login_password(login_password)
@@ -691,6 +736,7 @@ class MonitorTaskSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         login_password = validated_data.pop('login_password', '')
+        validated_data.pop('environment_package', None)
         task = super().update(instance, validated_data)
         if login_password:
             task.set_login_password(login_password)
@@ -717,6 +763,20 @@ class MonitorTaskSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('执行间隔必须大于 0')
         return value
 
+    def _get_monitor_module_names(self, api_configs, automation_interfaces):
+        module_names = {item.module_name for item in api_configs + automation_interfaces if item.module_name}
+        source_interface_ids = {
+            source_id
+            for config in api_configs
+            for source_id in (config.source_interface_ids or [config.source_interface_id])
+            if source_id
+        }
+        if source_interface_ids:
+            module_names.update(
+                ApiInterface.objects.filter(id__in=source_interface_ids).values_list('module_name', flat=True)
+            )
+        return module_names
+
     def validate(self, attrs):
         api_type = attrs.get('api_type', self.instance.api_type if self.instance else '')
         api_configs = attrs.get('api_configs')
@@ -727,6 +787,21 @@ class MonitorTaskSerializer(serializers.ModelSerializer):
             attrs['automation_interfaces'] = automation_interfaces
         if not api_configs and not automation_interfaces:
             raise serializers.ValidationError({'api_type': '该接口名称下暂无可执行接口'})
+        package = attrs.get('environment_package')
+        if package:
+            module_names = self._get_monitor_module_names(api_configs, automation_interfaces)
+            apps = {'backend' if name == '后台' else 'frontend' for name in module_names}
+            if len(apps) != 1:
+                raise serializers.ValidationError({'api_type': '监控接口必须归属同一所属端'})
+            app = next(iter(apps), 'backend')
+            markers = ('后台',) if app == 'backend' else ('前台', '前端')
+            environments = [environment for environment in package.environments.all() if any(marker in environment.name for marker in markers)]
+            if len(environments) != 1:
+                label = '后台' if app == 'backend' else '前台或前端'
+                raise serializers.ValidationError({'environment_package': f'环境包“{package.name}”需要且只能配置一个名称带“{label}”的环境'})
+            attrs['environment'] = environments[0]
+        elif not self.instance and not attrs.get('environment'):
+            raise serializers.ValidationError({'environment_package': '请选择环境包'})
         return attrs
 
 

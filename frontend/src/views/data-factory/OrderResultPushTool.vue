@@ -54,14 +54,14 @@
           <el-icon><Promotion /></el-icon>
           推送订单结果
         </el-button>
-        <el-button v-if="hasPermission('data_factory.rollback_settlement')" type="warning" :loading="rollbackSubmitting" :disabled="!canRunFollowUpActions" @click="rollback">
+        <el-button v-if="hasPermission('data_factory.rollback_settlement')" type="warning" :loading="rollbackSubmitting" :disabled="isSubmitting" @click="rollback">
           <el-icon><RefreshLeft /></el-icon>
           回滚结算
         </el-button>
-        <el-button v-if="hasPermission('data_factory.bet_cancel')" type="danger" :loading="cancelSubmitting" :disabled="!canRunFollowUpActions" @click="cancel">
+        <el-button v-if="hasPermission('data_factory.bet_cancel')" type="danger" :loading="cancelSubmitting" :disabled="isSubmitting" @click="cancel">
           取消
         </el-button>
-        <el-button v-if="hasPermission('data_factory.rollback_bet_cancel')" type="success" :loading="rollbackCancelSubmitting" :disabled="!canRunFollowUpActions" @click="rollbackCancel">
+        <el-button v-if="hasPermission('data_factory.rollback_bet_cancel')" type="success" :loading="rollbackCancelSubmitting" :disabled="isSubmitting" @click="rollbackCancel">
           <el-icon><RefreshLeft /></el-icon>
           回滚取消
         </el-button>
@@ -106,7 +106,6 @@ const rollbackCancelSubmitting = ref(false)
 const formRef = ref<FormInstance>()
 const response = ref<OrderResultPushResult>()
 const lastAction = ref<'push' | 'rollback' | 'cancel' | 'rollbackCancel'>('push')
-const pushedOrderKey = ref('')
 const isSubmitting = computed(() => submitting.value || rollbackSubmitting.value || cancelSubmitting.value || rollbackCancelSubmitting.value)
 const resultTitle = computed(() => ({
   push: '推送成功',
@@ -127,14 +126,6 @@ const form = reactive({
   start_time: '',
   end_time: '',
 })
-const currentOrderKey = computed(() => JSON.stringify({
-  product: form.product,
-  event_id: form.event_id,
-  market_id: form.market_id,
-  specifiers: form.specifiers,
-  timestamp: form.timestamp,
-}))
-const canRunFollowUpActions = computed(() => !isSubmitting.value && pushedOrderKey.value === currentOrderKey.value)
 const rules: FormRules = {
   certainty: [{ required: true, message: '请输入 certainty' }],
   product: [{ required: true, message: '请输入 product' }],
@@ -153,7 +144,6 @@ watch(visible, isVisible => {
     form.end_time = ''
     response.value = undefined
     lastAction.value = 'push'
-    pushedOrderKey.value = ''
   }
 })
 
@@ -181,7 +171,6 @@ async function submit() {
     })
     response.value = result.data
     lastAction.value = 'push'
-    pushedOrderKey.value = currentOrderKey.value
     emit('executed')
     ElMessage.success('订单结果推送成功')
   } catch (error) {

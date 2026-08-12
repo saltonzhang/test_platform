@@ -12,7 +12,7 @@
       </div>
 
       <el-alert
-        title="请分别选择前台环境和后台环境，后端会按两个环境分别取地址执行。"
+        title="请选择环境包，后端会自动读取其中的前台和后台配置执行。"
         type="info"
         :closable="false"
         show-icon
@@ -22,34 +22,20 @@
         <section class="account-add-section">
           <div class="account-add-section-head">
             <strong>运行环境</strong>
-            <span>前台环境与后台环境分开选择</span>
+            <span>按环境名称识别前台和后台配置</span>
           </div>
 
           <el-row :gutter="16">
             <el-col :xs="24" :sm="12">
-              <el-form-item label="前台运行环境" prop="frontend_environment">
-                <el-select v-model="form.frontend_environment" clearable placeholder="请选择前台环境" style="width: 100%" @change="markFrontendSelection">
-                  <el-option
-                    v-for="env in environmentOptions"
-                    :key="env.id"
-                    :label="env.name"
-                    :value="env.id"
-                  />
+              <el-form-item label="环境包" prop="environment_package">
+                <el-select v-model="form.environment_package" clearable placeholder="请选择环境包" style="width: 100%">
+                  <el-option v-for="pkg in usablePackages" :key="pkg.id" :label="pkg.name" :value="pkg.id" />
                 </el-select>
               </el-form-item>
             </el-col>
 
             <el-col :xs="24" :sm="12">
-              <el-form-item label="后台运行环境" prop="backend_environment">
-                <el-select v-model="form.backend_environment" clearable placeholder="请选择后台环境" style="width: 100%" @change="markBackendSelection">
-                  <el-option
-                    v-for="env in environmentOptions"
-                    :key="env.id"
-                    :label="env.name"
-                    :value="env.id"
-                  />
-                </el-select>
-              </el-form-item>
+              <el-form-item label="配置预览"><span>{{ selectedPackageSummary }}</span></el-form-item>
             </el-col>
           </el-row>
         </section>
@@ -141,10 +127,10 @@ import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { CirclePlusFilled } from '@element-plus/icons-vue'
 import * as api from '@/api'
-import type { Environment } from '@/types'
+import type { EnvironmentPackage } from '@/types'
 
 const visible = defineModel<boolean>({ default: false })
-const props = defineProps<{ environments: Environment[] }>()
+const props = defineProps<{ environmentPackages: EnvironmentPackage[] }>()
 const emit = defineEmits<{ executed: [] }>()
 
 const formRef = ref<FormInstance>()
@@ -154,25 +140,23 @@ const resultState = ref<'idle' | 'running' | 'passed' | 'failed'>('idle')
 const generatedEmails = ref<string[]>([])
 const currentExecutionId = ref<number | null>(null)
 const refreshing = ref(false)
-const frontendDefaultPending = ref(true)
-const backendDefaultPending = ref(true)
 const form = reactive<{
-  frontend_environment: number | null
-  backend_environment: number | null
+  environment_package: number | null
   email: string
   referral_code: string
   quantity: number
   amount: number | null
 }>({
-  frontend_environment: null,
-  backend_environment: null,
+  environment_package: null,
   email: '',
   referral_code: '',
   quantity: 1,
   amount: null,
 })
 
-const environmentOptions = computed(() => props.environments)
+const isFrontendEnvironment = (name: string) => name.includes('前台') || name.includes('前端')
+const usablePackages = computed(() => props.environmentPackages)
+const selectedPackageSummary = computed(() => { const pkg = usablePackages.value.find(item => item.id === form.environment_package); if (!pkg) return '请选择环境包'; const frontend = pkg.environments.find(env => isFrontendEnvironment(env.name)); const backend = pkg.environments.find(env => env.name.includes('后台')); return `前台：${frontend?.name || '未配置'}；后台：${backend?.name || '未配置'}` })
 const resultStateLabel = computed(() => ({
   idle: '待执行',
   running: '执行中',
@@ -220,47 +204,14 @@ const validateEmail = (_rule: unknown, value: string, callback: (error?: Error) 
 }
 
 const rules: FormRules = {
-  frontend_environment: [{ required: true, message: '请选择前台运行环境' }],
-  backend_environment: [{ required: true, message: '请选择后台运行环境' }],
+  environment_package: [{ required: true, message: '请选择环境包' }],
   email: [{ validator: validateEmail, trigger: 'blur' }],
   quantity: [{ required: true, message: '请输入数量' }, { validator: validatePositiveInteger, trigger: 'change' }],
   amount: [{ validator: validateAmount, trigger: 'change' }],
 }
 
-function syncSelections() {
-  if (form.frontend_environment && !environmentOptions.value.some((item) => item.id === form.frontend_environment)) {
-    form.frontend_environment = null
-    frontendDefaultPending.value = true
-  }
-  if (form.backend_environment && !environmentOptions.value.some((item) => item.id === form.backend_environment)) {
-    form.backend_environment = null
-    backendDefaultPending.value = true
-  }
-  if (frontendDefaultPending.value && !form.frontend_environment) {
-    form.frontend_environment = findEnvironmentId(['前台测试环境', '前端测试环境'])
-  }
-  if (backendDefaultPending.value && !form.backend_environment) {
-    form.backend_environment = findEnvironmentId(['后台测试环境'])
-  }
-}
-
-function findEnvironmentId(names: string[]) {
-  return environmentOptions.value.find((item) => names.includes(item.name))?.id ?? null
-}
-
-function markFrontendSelection() {
-  frontendDefaultPending.value = false
-}
-
-function markBackendSelection() {
-  backendDefaultPending.value = false
-}
-
 function resetForm() {
-  frontendDefaultPending.value = true
-  backendDefaultPending.value = true
-  form.frontend_environment = null
-  form.backend_environment = null
+  form.environment_package = null
   form.email = ''
   form.referral_code = ''
   form.quantity = 1
@@ -311,11 +262,10 @@ async function refreshResultByExecutionId() {
   }
 }
 
-watch(environmentOptions, syncSelections, { immediate: true })
+watch(usablePackages, packages => { if (packages.length && !packages.some(item => item.id === form.environment_package)) form.environment_package = packages[0].id }, { immediate: true })
 watch(visible, (isVisible) => {
   if (isVisible) {
     resetForm()
-    syncSelections()
   } else {
     resetResultPanel()
   }
@@ -325,22 +275,20 @@ async function submit() {
   if (!(await formRef.value?.validate().catch(() => false))) {
     return
   }
-  if (!form.frontend_environment || !form.backend_environment) {
-    ElMessage.warning('请选择前台环境和后台环境')
+  if (!form.environment_package) {
+    ElMessage.warning('请选择环境包')
     return
   }
-  const frontendEnvironmentId = form.frontend_environment
-  const backendEnvironmentId = form.backend_environment
   try {
+    const selectedPackage = usablePackages.value.find(item => item.id === form.environment_package)
     await ElMessageBox.confirm(
-      `确认使用前台环境「${environmentOptions.value.find((item) => item.id === frontendEnvironmentId)?.name || frontendEnvironmentId}」和后台环境「${environmentOptions.value.find((item) => item.id === backendEnvironmentId)?.name || backendEnvironmentId}」执行账户添加吗？`,
+      `确认使用环境包「${selectedPackage?.name || form.environment_package}」执行账户添加吗？`,
       '确认账户添加',
       { type: 'warning', confirmButtonText: '确认执行' },
     )
     submitting.value = true
     const result = await api.executeAccountAdd({
-      frontend_environment: frontendEnvironmentId,
-      backend_environment: backendEnvironmentId,
+      environment_package: form.environment_package,
       email: form.email,
       referral_code: form.referral_code,
       quantity: form.quantity,

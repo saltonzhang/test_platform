@@ -14,7 +14,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 from django.core.files.uploadedfile import SimpleUploadedFile
 
-from .models import ApiInterface, AutomationModule, AutomationTask, AutomationTaskResult, DataFactoryExecution, Environment, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorTask, Role, User, UserEnvironmentAccount
+from .models import ApiInterface, AutomationModule, AutomationTask, AutomationTaskResult, DataFactoryExecution, Environment, EnvironmentPackage, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorTask, Role, User, UserEnvironmentAccount
 from .executor import api_request_executor
 from .interface_import import parse_fetch_text
 from .testcase.services import parse_xmind_package
@@ -202,8 +202,8 @@ class DataFactoryMemberQueryTests(SimpleTestCase):
         result = query_member_by_email(' Colin7672@Proton.me ', environment_name='helix')
 
         mocked_query_one.assert_called_once_with(
-            'SELECT id, uuid, id_number, email, nickname FROM member WHERE email = %s LIMIT 1',
-            ('colin7672@proton.me',),
+            'SELECT id, uuid, id_number, email, nickname FROM member WHERE email = %s OR nickname = %s LIMIT 1',
+            ('colin7672@proton.me', 'Colin7672@Proton.me'),
         )
         self.assertEqual(result, {
             'environment_name': 'helix',
@@ -222,15 +222,17 @@ class DataFactoryMemberStatusActivateTests(SimpleTestCase):
         from platform_api.data_factory.member_status_activate import activate_member_status
 
         mocked_db = mocked_database_client.return_value.__enter__.return_value
+        mocked_db.query_one.return_value = {'id': 402349924005449728}
         mocked_db.execute_write.return_value = 1
 
-        result = activate_member_status('402349924005449728', environment_name='helix')
+        result = activate_member_status('Member@Example.com', environment_name='helix')
 
         mocked_db.execute_write.assert_called_once()
         sql, params = mocked_db.execute_write.call_args.args
         self.assertIn('UPDATE member_extra', sql)
+        self.assertIn('SELECT id FROM member WHERE email = %s', sql)
+        self.assertEqual(params, ('member@example.com',))
         self.assertIn('SET last_active_time = NOW()', sql)
-        self.assertEqual(params, ('402349924005449728',))
         self.assertEqual(result, {
             'environment_name': 'helix',
             'member_id': '402349924005449728',
@@ -761,11 +763,13 @@ class PlatformApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_current_user_environment_accounts_are_isolated_and_can_be_saved(self):
+        default_package = EnvironmentPackage.objects.create(name='默认账号环境包')
+        secondary_package = EnvironmentPackage.objects.create(name='备用账号环境包')
         default_environment = Environment.objects.create(
-            name='默认账号环境', base_url='https://default.example.com', is_default=True,
+            name='默认账号环境', base_url='https://default.example.com', is_default=True, package=default_package,
         )
         secondary_environment = Environment.objects.create(
-            name='备用账号环境', base_url='https://secondary.example.com',
+            name='备用账号环境', base_url='https://secondary.example.com', package=secondary_package,
         )
         other_user = User.objects.create_user(
             username='other-user', password='SafePass@123', name='其他用户', role=self.tester_role,
@@ -779,9 +783,13 @@ class PlatformApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['data'], {
             'accounts': [],
-            'environments': [
-                {'id': default_environment.id, 'name': '默认账号环境'},
-                {'id': secondary_environment.id, 'name': '备用账号环境'},
+            'environment_packages': [
+                {'id': secondary_package.id, 'name': '备用账号环境包', 'environments': [
+                    {'id': secondary_environment.id, 'name': '备用账号环境'},
+                ]},
+                {'id': default_package.id, 'name': '默认账号环境包', 'environments': [
+                    {'id': default_environment.id, 'name': '默认账号环境'},
+                ]},
             ],
         })
 
@@ -806,8 +814,8 @@ class PlatformApiTests(APITestCase):
             'other-account',
         )
         self.assertEqual(response.data['data']['accounts'], [
-            {'environment_id': default_environment.id, 'environment_name': '默认账号环境', 'account': 'default-account'},
-            {'environment_id': secondary_environment.id, 'environment_name': '备用账号环境', 'account': 'secondary-account'},
+            {'environment_id': default_environment.id, 'environment_name': '默认账号环境', 'environment_package_id': default_package.id, 'environment_package_name': '默认账号环境包', 'account': 'default-account'},
+            {'environment_id': secondary_environment.id, 'environment_name': '备用账号环境', 'environment_package_id': secondary_package.id, 'environment_package_name': '备用账号环境包', 'account': 'secondary-account'},
         ])
 
     def test_user_can_be_created_without_email(self):
@@ -896,21 +904,22 @@ class PlatformApiTests(APITestCase):
         'nickname': 'User442106',
     })
     def test_data_factory_member_query_returns_selected_environment_and_sanitized_fields(self, mocked_query_member):
+        package = EnvironmentPackage.objects.create(name='用户查询环境包')
         environment = Environment.objects.create(
-            name='helix', base_url='https://tool.example.com', login_url='https://tool.example.com/login',
+            name='查询后台环境', base_url='https://tool.example.com', login_url='https://tool.example.com/login', package=package,
         )
 
         response = self.client.post('/api/data-factory/member-query/', {
-            'environment': environment.id,
-            'email': 'Colin7672@Proton.me',
+            'environment_package': package.id,
+            'keyword': 'Colin7672@Proton.me',
         }, format='json')
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        mocked_query_member.assert_called_once_with('colin7672@proton.me', environment_name='helix')
+        mocked_query_member.assert_called_once_with('Colin7672@Proton.me', environment_name='查询后台环境')
         self.assertEqual(response.data['data']['member_id'], '407361968781922304')
         self.assertEqual(response.data['data']['uid'], '21181393-7bc4-4eb1-b4f1-80eae482fcbe')
         self.assertNotIn('password', str(response.data).lower())
-        execution = DataFactoryExecution.objects.get(tool_name='查询用户信息', email='colin7672@proton.me')
+        execution = DataFactoryExecution.objects.get(tool_name='查询用户信息', email='Colin7672@Proton.me')
         self.assertEqual(execution.environment, environment)
         self.assertEqual(execution.member_id, '407361968781922304')
 
@@ -922,21 +931,22 @@ class PlatformApiTests(APITestCase):
         'message': '用户状态已激活，影响行数 1',
     })
     def test_data_factory_member_status_activate_returns_selected_environment_and_records_execution(self, mocked_activate_member_status):
+        package = EnvironmentPackage.objects.create(name='状态激活环境包')
         environment = Environment.objects.create(
-            name='helix', base_url='https://tool.example.com', login_url='https://tool.example.com/login',
+            name='状态激活后台环境', base_url='https://tool.example.com', login_url='https://tool.example.com/login', package=package,
         )
 
         response = self.client.post('/api/data-factory/member-status-activate/', {
-            'environment': environment.id,
-            'member_id': '402349924005449728',
+            'environment_package': package.id,
+            'email': 'member@example.com',
         }, format='json')
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        mocked_activate_member_status.assert_called_once_with('402349924005449728', environment_name='helix')
+        mocked_activate_member_status.assert_called_once_with('member@example.com', environment_name='状态激活后台环境')
         self.assertEqual(response.data['data']['member_id'], '402349924005449728')
         self.assertEqual(response.data['data']['affected_rows'], 1)
         self.assertNotIn('password', str(response.data).lower())
-        execution = DataFactoryExecution.objects.get(tool_name='用户状态激活', member_id='402349924005449728')
+        execution = DataFactoryExecution.objects.get(tool_name='用户状态激活', email='member@example.com')
         self.assertEqual(execution.environment, environment)
         self.assertEqual(execution.message, '用户状态已激活，影响行数 1')
 
@@ -1342,12 +1352,13 @@ fetch("https://api-test.helix.city/api/v1/member/getUnreadCount?scope=all", {
         'member_id': 'member-1', 'adjustment_id': 'adjustment-1',
     })
     def test_data_factory_uses_configured_platform_credentials(self, mocked_execute):
+        package = EnvironmentPackage.objects.create(name='余额工具环境包')
         environment = Environment.objects.create(
             name='后台工具环境', base_url='https://admin.example.com',
-            login_url='https://admin.example.com/auth/login',
+            login_url='https://admin.example.com/auth/login', package=package,
         )
         response = self.client.post('/api/data-factory/account-balance/', {
-            'environment': environment.id,
+            'environment_package': package.id,
             'email': 'member@example.com',
             'amount': 10,
         }, format='json')
@@ -1358,18 +1369,30 @@ fetch("https://api-test.helix.city/api/v1/member/getUnreadCount?scope=all", {
 
     @patch('platform_api.views.execute_account_balance', side_effect=ValueError('boom'))
     def test_data_factory_account_balance_unexpected_error_returns_400(self, mocked_execute):
+        package = EnvironmentPackage.objects.create(name='余额工具异常环境包')
         environment = Environment.objects.create(
             name='后台工具环境异常', base_url='https://admin.example.com',
-            login_url='https://admin.example.com/auth/login',
+            login_url='https://admin.example.com/auth/login', package=package,
         )
         response = self.client.post('/api/data-factory/account-balance/', {
-            'environment': environment.id,
+            'environment_package': package.id,
             'email': 'member@example.com',
             'amount': 10,
         }, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('boom', str(response.data))
         mocked_execute.assert_called_once()
+
+    def test_data_factory_account_balance_requires_backend_environment_in_package(self):
+        package = EnvironmentPackage.objects.create(name='仅前台环境包')
+        Environment.objects.create(name='仅前台环境', base_url='https://web.example.com', package=package)
+        response = self.client.post('/api/data-factory/account-balance/', {
+            'environment_package': package.id,
+            'email': 'member@example.com',
+            'amount': 10,
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('未配置后台环境', str(response.data))
 
     @patch('platform_api.views.bet_cancel', return_value={
         'event_id': 'sr:match:66886868',
@@ -1489,18 +1512,19 @@ fetch("https://api-test.helix.city/api/v1/member/getUnreadCount?scope=all", {
     })
     def test_data_factory_account_add_runs_asynchronously(self, mocked_execute, mocked_thread, mocked_on_commit, mocked_close_connections):
         mocked_thread.return_value.start.side_effect = lambda: mocked_thread.call_args.kwargs['target']()
+        package = EnvironmentPackage.objects.create(name='账户添加环境包')
         frontend_environment = Environment.objects.create(
             name='账户添加前台环境', base_url='https://api-test.helix.city',
-            login_url='',
+            login_url='', package=package,
         )
         backend_environment = Environment.objects.create(
             name='账户添加后台环境', base_url='https://mgt-api-test.helix.city',
             login_url='https://mgt-api-test.helix.city/api/v2/login',
             variables=[{'key': 'userName', 'value': '用户名'}, {'key': 'password', 'value': '密码'}],
+            package=package,
         )
         response = self.client.post('/api/data-factory/account-add/', {
-            'frontend_environment': frontend_environment.id,
-            'backend_environment': backend_environment.id,
+            'environment_package': package.id,
             'email': '',
             'amount': 10,
             'quantity': 3,
@@ -1907,6 +1931,71 @@ fetch("https://api-test.helix.city/api/v1/member/getUnreadCount?scope=all", {
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertFalse(MonitorApiConfig.objects.filter(pk=config_id).exists())
         self.assertTrue(MonitorExecutionDetail.objects.filter(pk=detail.id).exists())
+
+    def test_monitor_task_uses_matching_environment_from_selected_package(self):
+        package = EnvironmentPackage.objects.create(name='监控任务环境包')
+        frontend_environment = Environment.objects.create(
+            name='监控前台环境', base_url='https://monitor-frontend.example.com', package=package,
+        )
+        backend_environment = Environment.objects.create(
+            name='监控后台环境', base_url='https://monitor-backend.example.com', package=package,
+        )
+        frontend_interface = ApiInterface.objects.create(
+            name='前台监控接口', method='GET', path='/api/frontend/health', module_name='个人中心',
+            headers={}, request_params={}, assertions={}, can_execute_in_task=True, created_by=self.admin,
+        )
+        backend_interface = ApiInterface.objects.create(
+            name='后台监控接口', method='GET', path='/api/backend/health', module_name='后台',
+            headers={}, request_params={}, assertions={}, can_execute_in_task=True, created_by=self.admin,
+        )
+
+        frontend_response = self.client.post('/api/monitor/tasks/', {
+            'name': '前台环境包监控任务', 'api_type': frontend_interface.name,
+            'environment_package': package.id, 'interval_value': 1,
+            'interval_unit': 'minute', 'enabled': True,
+        }, format='json')
+        self.assertEqual(frontend_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(frontend_response.data['data']['environment'], frontend_environment.id)
+
+        backend_response = self.client.post('/api/monitor/tasks/', {
+            'name': '后台环境包监控任务', 'api_type': backend_interface.name,
+            'environment_package': package.id, 'interval_value': 1,
+            'interval_unit': 'minute', 'enabled': True,
+        }, format='json')
+        self.assertEqual(backend_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(backend_response.data['data']['environment'], backend_environment.id)
+
+    def test_monitor_task_rejects_package_when_source_interfaces_span_apps(self):
+        package = EnvironmentPackage.objects.create(name='跨端监控任务环境包')
+        Environment.objects.create(
+            name='跨端监控前台环境', base_url='https://cross-frontend.example.com', package=package,
+        )
+        Environment.objects.create(
+            name='跨端监控后台环境', base_url='https://cross-backend.example.com', package=package,
+        )
+        frontend_interface = ApiInterface.objects.create(
+            name='跨端前台来源接口', method='GET', path='/api/frontend/health', module_name='个人中心',
+            headers={}, request_params={}, assertions={}, created_by=self.admin,
+        )
+        backend_interface = ApiInterface.objects.create(
+            name='跨端后台来源接口', method='GET', path='/api/backend/health', module_name='后台',
+            headers={}, request_params={}, assertions={}, created_by=self.admin,
+        )
+        MonitorApiConfig.objects.create(
+            name='跨端监控接口', method='GET', path='/api/health', module_name='',
+            source_interface=frontend_interface,
+            source_interface_ids=[frontend_interface.id, backend_interface.id],
+            headers={}, request_params={}, assertions={}, created_by=self.admin,
+        )
+
+        response = self.client.post('/api/monitor/tasks/', {
+            'name': '跨端环境包监控任务', 'api_type': '跨端监控接口',
+            'environment_package': package.id, 'interval_value': 1,
+            'interval_unit': 'minute', 'enabled': True,
+        }, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data['message'], '监控接口必须归属同一所属端')
 
     def test_business_models_have_chinese_table_comments(self):
         models = [Role, User, Environment, AutomationModule, ApiInterface, AutomationTask, AutomationTaskResult, MonitorApiConfig, MonitorTask, MonitorExecution, MonitorExecutionDetail, MonitorAlarm]

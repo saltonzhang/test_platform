@@ -101,10 +101,10 @@
     </div>
   </section>
 
-  <AccountBalanceTool v-model="accountBalanceVisible" :environments="environments" @executed="loadHistory" />
-  <AccountAddTool v-model="accountAddVisible" :environments="environments" @executed="loadHistory" />
-  <MemberStatusActivateTool v-model="memberStatusActivateVisible" :environments="environments" @executed="loadHistory" />
-  <MemberQueryTool v-model="memberQueryVisible" :environments="environments" @executed="loadHistory" />
+  <AccountBalanceTool v-model="accountBalanceVisible" :environment-packages="environmentPackages" @executed="loadHistory" />
+  <AccountAddTool v-model="accountAddVisible" :environment-packages="environmentPackages" @executed="loadHistory" />
+  <MemberStatusActivateTool v-model="memberStatusActivateVisible" :environment-packages="environmentPackages" @executed="loadHistory" />
+  <MemberQueryTool v-model="memberQueryVisible" :environment-packages="environmentPackages" @executed="loadHistory" />
   <OrderResultPushTool v-model="orderResultPushVisible" @executed="loadHistory" />
 
   <el-drawer v-model="historyVisible" title="数据工厂操作记录" size="min(940px, 94vw)">
@@ -141,7 +141,7 @@ import { CircleCheckFilled, CirclePlusFilled, Document, Promotion, UserFilled, W
 import { hasPermission } from '@/auth'
 import * as api from '@/api'
 import dayjs from 'dayjs'
-import type { DataFactoryExecution, Environment } from '@/types'
+import type { DataFactoryExecution, Environment, EnvironmentPackage } from '@/types'
 import AccountAddTool from './AccountAddTool.vue'
 import AccountBalanceTool from './AccountBalanceTool.vue'
 import MemberStatusActivateTool from './MemberStatusActivateTool.vue'
@@ -149,6 +149,7 @@ import MemberQueryTool from './MemberQueryTool.vue'
 import OrderResultPushTool from './OrderResultPushTool.vue'
 
 const environments = ref<Environment[]>([])
+const environmentPackages = ref<EnvironmentPackage[]>([])
 const accountBalanceVisible = ref(false)
 const accountAddVisible = ref(false)
 const memberStatusActivateVisible = ref(false)
@@ -202,6 +203,12 @@ onMounted(async () => {
   try {
     const response = await api.getDataFactoryEnvironments()
     environments.value = response.data
+    try {
+      const packageResponse = await api.getDataFactoryEnvironmentPackages()
+      environmentPackages.value = Array.isArray(packageResponse) ? packageResponse : packageResponse.data
+    } catch {
+      environmentPackages.value = []
+    }
   } catch (error) {
     ElMessage.error((error as Error).message)
   }

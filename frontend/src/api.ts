@@ -1,7 +1,7 @@
 import axios from 'axios'
 import { clearAuth, auth } from './auth'
 import router from './router'
-import type { AccountAddResult, AccountBalanceResult, ApiInterface, ApiResponse, AutomationModule, AutomationTask, AutomationTaskResult, DashboardStats, DataFactoryExecution, Environment, EnvironmentAccountSettings, LoginResult, MemberQueryResult, MemberStatusActivateResult, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorTask, OrderResultPushResult, PageResult, Role, TestCasePackage, User } from './types'
+import type { AccountAddResult, AccountBalanceResult, ApiInterface, ApiResponse, AutomationModule, AutomationTask, AutomationTaskResult, DashboardStats, DataFactoryExecution, Environment, EnvironmentAccountSettings, EnvironmentPackage, LoginResult, MemberQueryResult, MemberStatusActivateResult, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorTask, OrderResultPushResult, PageResult, Role, TestCasePackage, User } from './types'
 
 const request = axios.create({ baseURL:'/api', timeout:15000 })
 request.interceptors.request.use(config => { if (auth.token) config.headers.Authorization = `Bearer ${auth.token}`; return config })
@@ -15,15 +15,16 @@ export const getMe = () => request.get<never,ApiResponse<User>>('/auth/me/')
 export const getMyEnvironmentAccounts = () => request.get<never,ApiResponse<EnvironmentAccountSettings>>('/me/environment-accounts/')
 export const saveMyEnvironmentAccounts = (accounts:{environment_id:number;account:string}[]) => request.put<never,ApiResponse<EnvironmentAccountSettings>>('/me/environment-accounts/', {accounts})
 export const getDashboard = () => request.get<never,ApiResponse<DashboardStats>>('/dashboard/')
-export const executeAccountBalance = (data:{environment:number;email:string;amount:number}) => request.post<never,ApiResponse<AccountBalanceResult>>('/data-factory/account-balance/',data)
-export const executeAccountAdd = (data:{frontend_environment:number;backend_environment:number;email:string;amount:number|null;quantity:number;referral_code?:string}) => request.post<never,ApiResponse<AccountAddResult>>('/data-factory/account-add/',data)
-export const activateMemberStatus = (data:{environment:number;member_id:string}) => request.post<never,ApiResponse<MemberStatusActivateResult>>('/data-factory/member-status-activate/',data)
-export const queryMemberInfo = (data:{environment:number;email:string}) => request.post<never,ApiResponse<MemberQueryResult>>('/data-factory/member-query/',data)
+export const executeAccountBalance = (data:{environment_package:number;email:string;amount:number}) => request.post<never,ApiResponse<AccountBalanceResult>>('/data-factory/account-balance/',data)
+export const executeAccountAdd = (data:{environment_package:number;email:string;amount:number|null;quantity:number;referral_code?:string}) => request.post<never,ApiResponse<AccountAddResult>>('/data-factory/account-add/',data)
+export const activateMemberStatus = (data:{environment_package:number;email:string}) => request.post<never,ApiResponse<MemberStatusActivateResult>>('/data-factory/member-status-activate/',data)
+export const queryMemberInfo = (data:{environment_package:number;keyword:string}) => request.post<never,ApiResponse<MemberQueryResult>>('/data-factory/member-query/',data)
 export const pushOrderResult = (data:Record<string,string|number>) => request.post<never,ApiResponse<OrderResultPushResult>>('/data-factory/order-result-push/',data)
 export const cancelBet = (data:{product:string|number;event_id:string;market_id:string|number;specifiers?:string;start_time?:string;end_time?:string;timestamp?:number|string}) => request.post<never,ApiResponse<OrderResultPushResult>>('/data-factory/bet-cancel/',data)
 export const rollbackBetCancel = (data:{product:string|number;event_id:string;market_id:string|number;specifiers?:string;start_time?:string;end_time?:string;timestamp?:number|string}) => request.post<never,ApiResponse<OrderResultPushResult>>('/data-factory/rollback-bet-cancel/',data)
 export const rollbackSettlement = (data:Record<string,string|number>) => request.post<never,ApiResponse<OrderResultPushResult>>('/data-factory/rollback-settlement/',data)
 export const getDataFactoryEnvironments = () => request.get<never,ApiResponse<Environment[]>>('/data-factory/environments/')
+export const getDataFactoryEnvironmentPackages = () => request.get<never,ApiResponse<EnvironmentPackage[]>>('/data-factory/environment-packages/')
 export const getDataFactoryExecutions = (params:Record<string,unknown>) => request.get<never,ApiResponse<PageResult<DataFactoryExecution>>>('/data-factory/executions/',{params})
 export const getUsers = (params:Record<string,unknown>) => request.get<never,ApiResponse<PageResult<User>>>('/users/', {params})
 export const createUser = (data:Record<string,unknown>) => request.post<never,ApiResponse<User>>('/users/', data)
@@ -42,6 +43,10 @@ export const updateEnvironment = (id:number,data:Record<string,unknown>) => requ
 export const deleteEnvironment = (id:number) => request.delete<never,ApiResponse<null>>(`/environments/${id}/`)
 export const copyEnvironment = (id:number) => request.post<never,ApiResponse<Environment>>(`/environments/${id}/copy/`,{})
 export const setDefaultEnvironment = (id:number) => request.post<never,ApiResponse<Environment>>(`/environments/${id}/default/`,{})
+export const getEnvironmentPackages = () => request.get<never,ApiResponse<EnvironmentPackage[]>>('/environment-packages/')
+export const createEnvironmentPackage = (data:Record<string,unknown>) => request.post<never,ApiResponse<EnvironmentPackage>>('/environment-packages/',data)
+export const updateEnvironmentPackage = (id:number,data:Record<string,unknown>) => request.patch<never,ApiResponse<EnvironmentPackage>>(`/environment-packages/${id}/`,data)
+export const deleteEnvironmentPackage = (id:number) => request.delete<never,ApiResponse<null>>(`/environment-packages/${id}/`)
 export const getAutomationModules = (params:Record<string,unknown>={}) => request.get<never,ApiResponse<AutomationModule[]>>('/automation/modules/',{params})
 export const getInterfaces = (params:Record<string,unknown>={}) => request.get<never,ApiResponse<PageResult<ApiInterface>>>('/interfaces/',{params})
 export const getTestCasePackages = (params:Record<string,unknown>={}) => request.get<never,ApiResponse<PageResult<TestCasePackage>>>('/testcase/packages/',{params})

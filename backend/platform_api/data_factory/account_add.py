@@ -42,6 +42,8 @@ def check_member_exists(email):
 
 
 def query_kyc_info_from_db(email):
+    member_id = None
+    member_uuid = None
     try:
         with DatabaseClient() as db:
             member_row = db.query_one('SELECT id, uuid FROM member WHERE email = %s LIMIT 1', (email,))
@@ -49,9 +51,11 @@ def query_kyc_info_from_db(email):
                 print(f'❌ 数据库 member 表未查到账号: {email}')
                 return None, None, None, None
 
-            member_id = member_row['id']
-            uuid = member_row['uuid']
-            #print(f'✅ 查找到用户 member_id: {member_id}, uuid: {uuid}')
+            member_id = member_row.get('id')
+            member_uuid = member_row.get('uuid')
+            if not member_uuid:
+                print(f'❌ 数据库 member 表未查到 uuid: {email}')
+                return member_id, None, None, None
 
             kyc_row = db.query_one(
                 '''
@@ -60,11 +64,11 @@ def query_kyc_info_from_db(email):
                     WHERE user_id = %s
                     ORDER BY id DESC LIMIT 1
                 ''',
-                (uuid,),
+                (member_uuid,),
             )
         if not kyc_row:
-            print(f'❌ 数据库 kyc_record 表未查到 user_id = {uuid} 的记录')
-            return member_id, uuid, None, None
+            print(f'❌ 数据库 kyc_record 表未查到 user_id = {member_uuid} 的记录')
+            return member_id, member_uuid, None, None
 
         serasa_validation_id = kyc_row['serasa_validation_id']
         request_payload_raw = kyc_row['request_payload']
@@ -76,7 +80,7 @@ def query_kyc_info_from_db(email):
                     document_cpf = item.get('value')
                     break
 
-        return member_id, uuid, serasa_validation_id, document_cpf
+        return member_id, member_uuid, serasa_validation_id, document_cpf
     except Exception as exc:
         print(f'❌ 数据库查询出错: {exc}')
         return None, None, None, None
@@ -573,11 +577,11 @@ def _run_single_account(frontend_environment, backend_environment, email='', amo
             print('\n⏳ 正在等待数据库写入 KYC 记录 (延时 2 秒)...')
             time.sleep(2)
 
-            member_id, uuid, protocol, document = query_kyc_info_from_db(email_identifier)
+            member_id, member_uuid, protocol, document = query_kyc_info_from_db(email_identifier)
             if not member_id:
                 raise DataFactoryError('未能从数据库中找到 member_id')
             print(
-                f'🎯 查库解析成功!\n -> member_id: {member_id}\n -> user_id (uuid): {uuid}\n'
+                f'🎯 查库解析成功!\n -> member_id: {member_id}\n -> user_id (uuid): {member_uuid}\n'
                 f' -> protocol (serasa_validation_id): {protocol}\n -> document (CPF): {document}'
             )
             mark_kyc_passed(member_id)

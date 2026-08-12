@@ -2,13 +2,14 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenRefreshView
 
-from .views import ApiInterfaceViewSet, AutomationModuleViewSet, AutomationTaskResultViewSet, AutomationTaskViewSet, DashboardView, DataFactoryAccountAddView, DataFactoryAccountBalanceView, DataFactoryBetCancelView, DataFactoryEnvironmentView, DataFactoryExecutionView, DataFactoryMemberQueryView, DataFactoryMemberStatusActivateView, DataFactoryOrderResultPushView, DataFactoryRollbackBetCancelView, DataFactoryRollbackSettlementView, EnvironmentViewSet, LarkCallbackView, LarkLoginView, LoginView, MeEnvironmentAccountView, MeViewSet, MonitorAlarmViewSet, MonitorApiConfigViewSet, MonitorExecutionDetailViewSet, MonitorExecutionViewSet, MonitorTaskViewSet, RoleViewSet, UserViewSet
+from .views import ApiInterfaceViewSet, AutomationModuleViewSet, AutomationTaskResultViewSet, AutomationTaskViewSet, DashboardView, DataFactoryAccountAddView, DataFactoryAccountBalanceView, DataFactoryBetCancelView, DataFactoryEnvironmentPackageView, DataFactoryEnvironmentView, DataFactoryExecutionView, DataFactoryMemberQueryView, DataFactoryMemberStatusActivateView, DataFactoryOrderResultPushView, DataFactoryRollbackBetCancelView, DataFactoryRollbackSettlementView, EnvironmentPackageViewSet, EnvironmentViewSet, LarkCallbackView, LarkLoginView, LoginView, MeEnvironmentAccountView, MeViewSet, MonitorAlarmViewSet, MonitorApiConfigViewSet, MonitorExecutionDetailViewSet, MonitorExecutionViewSet, MonitorTaskViewSet, RoleViewSet, UserViewSet
 from .testcase.views import TestCasePackageViewSet
 
 router = DefaultRouter()
 router.register('users', UserViewSet, basename='user')
 router.register('roles', RoleViewSet, basename='role')
 router.register('environments', EnvironmentViewSet, basename='environment')
+router.register('environment-packages', EnvironmentPackageViewSet, basename='environment-package')
 router.register('automation/modules', AutomationModuleViewSet, basename='automation-module')
 router.register('interfaces', ApiInterfaceViewSet, basename='api-interface')
 router.register('testcase/packages', TestCasePackageViewSet, basename='testcase-package')
@@ -37,6 +38,7 @@ urlpatterns = [
     path('data-factory/rollback-bet-cancel/', DataFactoryRollbackBetCancelView.as_view(), name='data-factory-rollback-bet-cancel'),
     path('data-factory/rollback-settlement/', DataFactoryRollbackSettlementView.as_view(), name='data-factory-rollback-settlement'),
     path('data-factory/environments/', DataFactoryEnvironmentView.as_view(), name='data-factory-environments'),
+    path('data-factory/environment-packages/', DataFactoryEnvironmentPackageView.as_view(), name='data-factory-environment-packages'),
     path('data-factory/executions/', DataFactoryExecutionView.as_view(), name='data-factory-executions'),
     path('', include(router.urls)),
 ]

@@ -27,11 +27,11 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from .constants import BUSINESS_MODULE_NAMES
 from .data_factory import DataFactoryError, activate_member_status, bet_cancel, execute_account_add, execute_account_balance, push_order_result, query_member_by_email, rollback_bet_cancel, rollback_bet_settlement
 from .interface_import import InterfaceImportError, parse_fetch_text
-from .models import ApiInterface, AutomationModule, AutomationTask, AutomationTaskResult, DataFactoryExecution, Environment, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorTask, Role, User, UserEnvironmentAccount
+from .models import ApiInterface, AutomationModule, AutomationTask, AutomationTaskResult, DataFactoryExecution, Environment, EnvironmentPackage, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorTask, Role, User, UserEnvironmentAccount
 from .pagination import StandardPagination
 from .permissions import ActionPermissionMixin
 from .responses import success
-from .serializers import ApiInterfaceSerializer, AutomationModuleSerializer, AutomationTaskResultSerializer, AutomationTaskSerializer, DataFactoryExecutionSerializer, EnvironmentSerializer, MonitorAlarmSerializer, MonitorApiConfigSerializer, MonitorExecutionDetailSerializer, MonitorExecutionSerializer, MonitorTaskSerializer, PermissionSerializer, ResetPasswordSerializer, RoleSerializer, UserCreateSerializer, UserEnvironmentAccountUpdateSerializer, UserSerializer
+from .serializers import ApiInterfaceSerializer, AutomationModuleSerializer, AutomationTaskResultSerializer, AutomationTaskSerializer, DataFactoryExecutionSerializer, EnvironmentSerializer, EnvironmentPackageSerializer, MonitorAlarmSerializer, MonitorApiConfigSerializer, MonitorExecutionDetailSerializer, MonitorExecutionSerializer, MonitorTaskSerializer, PermissionSerializer, ResetPasswordSerializer, RoleSerializer, UserCreateSerializer, UserEnvironmentAccountUpdateSerializer, UserSerializer
 from .services import execute_monitor_task, execute_task, retry_monitor_detail, retry_task_result, sync_monitor_next_run_time
 
 
@@ -269,20 +269,29 @@ class MeEnvironmentAccountView(APIView):
             {
                 'environment_id': mapping.environment_id,
                 'environment_name': mapping.environment.name,
+                'environment_package_id': mapping.environment.package_id,
+                'environment_package_name': mapping.environment.package.name if mapping.environment.package else '',
                 'account': mapping.account,
             }
             for mapping in UserEnvironmentAccount.objects.filter(
                 user=request.user,
                 account__gt='',
-            ).select_related('environment').order_by(
+            ).select_related('environment__package').order_by(
                 '-environment__is_default', 'environment__created_at', 'environment_id',
             )
         ]
-        environments = [
-            {'id': environment.id, 'name': environment.name}
-            for environment in Environment.objects.all()
+        environment_packages = [
+            {
+                'id': package.id,
+                'name': package.name,
+                'environments': [
+                    {'id': environment.id, 'name': environment.name}
+                    for environment in package.environments.all()
+                ],
+            }
+            for package in EnvironmentPackage.objects.prefetch_related('environments').all()
         ]
-        return success({'accounts': accounts, 'environments': environments})
+        return success({'accounts': accounts, 'environment_packages': environment_packages})
 
     def put(self, request):
         serializer = UserEnvironmentAccountUpdateSerializer(data=request.data)
@@ -324,9 +333,17 @@ class DataFactoryAccountBalanceView(APIView):
             raise ValidationError({'amount': '请输入有效金额'}) from exc
         if not amount.is_finite() or amount <= 0 or amount > Decimal('1000000'):
             raise ValidationError({'amount': '金额必须大于 0 且不超过 1000000'})
-        environment_id = request.data.get('environment')
-        if not Environment.objects.filter(pk=environment_id).exists():
-            raise ValidationError({'environment': '请选择有效运行环境'})
+        package_id = request.data.get('environment_package')
+        try:
+            package = EnvironmentPackage.objects.prefetch_related('environments').get(pk=package_id)
+        except (EnvironmentPackage.DoesNotExist, TypeError, ValueError) as exc:
+            raise ValidationError({'environment_package': '请选择有效环境包'}) from exc
+        backend_environments = [environment for environment in package.environments.all() if '后台' in environment.name]
+        if not backend_environments:
+            raise ValidationError({'environment_package': f'环境包“{package.name}”未配置后台环境'})
+        if len(backend_environments) > 1:
+            raise ValidationError({'environment_package': f'环境包“{package.name}”包含多个名称带“后台”的环境，请保留唯一后台环境'})
+        environment_id = backend_environments[0].id
         execution = DataFactoryExecution.objects.create(tool_name='账户余额', operator=request.user, environment_id=environment_id, email=email, amount=amount)
         try:
             result = execute_account_balance(environment_id, email, amount)
@@ -348,37 +365,25 @@ class DataFactoryAccountBalanceView(APIView):
         return success(result, '账户余额已加款并审批')
 
 
-def resolve_account_add_environment_ids(data):
-    frontend_environment_id = data.get('frontend_environment') or data.get('front_environment')
-    backend_environment_id = data.get('backend_environment') or data.get('back_environment')
-    if frontend_environment_id and backend_environment_id:
-        return frontend_environment_id, backend_environment_id
-
-    selected = data.get('environments')
-    if selected in (None, ''):
-        selected = data.get('environment')
-    if hasattr(data, 'getlist'):
-        selected_list = data.getlist('environments') or data.getlist('environment')
-        if selected_list:
-            selected = selected_list
-    if isinstance(selected, (list, tuple)):
-        selected_ids = [item for item in selected if item not in (None, '')]
-        if len(selected_ids) != 2:
-            raise ValidationError({'environment': '请选择前台和后台两个运行环境'})
-        return selected_ids[0], selected_ids[1]
-    return selected, selected
-
-
 class DataFactoryAccountAddView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
         require_data_factory_account_add_permission(request)
-        frontend_environment_id, backend_environment_id = resolve_account_add_environment_ids(request.data)
-        frontend_environment = Environment.objects.filter(pk=frontend_environment_id).first()
+        package_id = request.data.get('environment_package')
+        try:
+            package = EnvironmentPackage.objects.prefetch_related('environments').get(pk=package_id)
+        except (EnvironmentPackage.DoesNotExist, TypeError, ValueError) as exc:
+            raise ValidationError({'environment_package': '请选择有效环境包'}) from exc
+        frontend_environments = [environment for environment in package.environments.all() if '前台' in environment.name or '前端' in environment.name]
+        backend_environments = [environment for environment in package.environments.all() if '后台' in environment.name]
+        if len(frontend_environments) != 1:
+            raise ValidationError({'environment_package': f'环境包“{package.name}”需要且只能配置一个名称带“前台”或“前端”的环境'})
+        if len(backend_environments) != 1:
+            raise ValidationError({'environment_package': f'环境包“{package.name}”需要且只能配置一个名称带“后台”的环境'})
+        frontend_environment, backend_environment = frontend_environments[0], backend_environments[0]
         if not frontend_environment:
             raise ValidationError({'frontend_environment': '请选择有效前台运行环境'})
-        backend_environment = Environment.objects.filter(pk=backend_environment_id).first()
         if not backend_environment:
             raise ValidationError({'backend_environment': '请选择有效后台运行环境'})
         if not frontend_environment.base_url:
@@ -469,18 +474,23 @@ class DataFactoryMemberQueryView(APIView):
 
     def post(self, request):
         require_data_factory_member_query_permission(request)
-        email = str(request.data.get('email', '')).strip().lower()
-        if not email or '@' not in email:
-            raise ValidationError({'email': '请输入有效邮箱'})
-        environment_id = request.data.get('environment')
-        environment = Environment.objects.filter(pk=environment_id).first()
-        if not environment:
-            raise ValidationError({'environment': '请选择有效运行环境'})
+        keyword = str(request.data.get('keyword', '')).strip()
+        if not keyword:
+            raise ValidationError({'keyword': '请输入邮箱或昵称'})
+        package_id = request.data.get('environment_package')
+        try:
+            package = EnvironmentPackage.objects.prefetch_related('environments').get(pk=package_id)
+        except (EnvironmentPackage.DoesNotExist, TypeError, ValueError) as exc:
+            raise ValidationError({'environment_package': '请选择有效环境包'}) from exc
+        backend_environments = [environment for environment in package.environments.all() if '后台' in environment.name]
+        if len(backend_environments) != 1:
+            raise ValidationError({'environment_package': f'环境包“{package.name}”需要且只能配置一个名称带“后台”的环境'})
+        environment = backend_environments[0]
         execution = DataFactoryExecution.objects.create(
-            tool_name='查询用户信息', operator=request.user, environment=environment, email=email, amount=0,
+            tool_name='查询用户信息', operator=request.user, environment=environment, email=keyword, amount=0,
         )
         try:
-            result = query_member_by_email(email, environment_name=environment.name)
+            result = query_member_by_email(keyword, environment_name=environment.name)
         except DataFactoryError as exc:
             execution.status = 'failed'
             execution.message = str(exc)
@@ -493,7 +503,7 @@ class DataFactoryMemberQueryView(APIView):
             raise ValidationError(f'查询用户信息异常：{exc}') from exc
         execution.status = 'passed'
         execution.member_id = result['member_id']
-        execution.message = f"UID={result['uid']}；CPF={result['cpf']}；昵称={result['nickname']}"
+        execution.message = f"ID={result['member_id']}；UUID={result['uid']}；ID Number={result['cpf']}；邮箱={result['email']}；昵称={result['nickname']}"
         execution.save(update_fields=['status', 'member_id', 'message', 'updated_at'])
         return success(result, '查询用户信息成功')
 
@@ -503,21 +513,24 @@ class DataFactoryMemberStatusActivateView(APIView):
 
     def post(self, request):
         require_data_factory_member_status_activate_permission(request)
-        member_id = str(request.data.get('member_id', '')).strip()
-        if not member_id:
-            raise ValidationError({'member_id': '请输入 member_id'})
-        if not member_id.isdigit():
-            raise ValidationError({'member_id': 'member_id 必须是数字'})
-        environment_id = request.data.get('environment')
-        environment = Environment.objects.filter(pk=environment_id).first()
-        if not environment:
-            raise ValidationError({'environment': '请选择有效运行环境'})
+        email = str(request.data.get('email', '')).strip().lower()
+        if not email or '@' not in email:
+            raise ValidationError({'email': '请输入有效邮箱'})
+        package_id = request.data.get('environment_package')
+        try:
+            package = EnvironmentPackage.objects.prefetch_related('environments').get(pk=package_id)
+        except (EnvironmentPackage.DoesNotExist, TypeError, ValueError) as exc:
+            raise ValidationError({'environment_package': '请选择有效环境包'}) from exc
+        backend_environments = [environment for environment in package.environments.all() if '后台' in environment.name]
+        if len(backend_environments) != 1:
+            raise ValidationError({'environment_package': f'环境包“{package.name}”需要且只能配置一个名称带“后台”的环境'})
+        environment = backend_environments[0]
         execution = DataFactoryExecution.objects.create(
-            tool_name='用户状态激活', operator=request.user, environment=environment, email='',
-            amount=0, member_id=member_id,
+            tool_name='用户状态激活', operator=request.user, environment=environment, email=email,
+            amount=0,
         )
         try:
-            result = activate_member_status(member_id, environment_name=environment.name)
+            result = activate_member_status(email, environment_name=environment.name)
         except DataFactoryError as exc:
             execution.status = 'failed'
             execution.message = str(exc)
@@ -809,6 +822,35 @@ class DataFactoryEnvironmentView(APIView):
         ])
 
 
+class DataFactoryEnvironmentPackageView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        require_data_factory_view_permission(request)
+        packages = EnvironmentPackage.objects.prefetch_related('environments').order_by('name')
+        return success([
+            {
+                'id': package.id,
+                'name': package.name,
+                'package_type': package.package_type,
+                'description': package.description,
+                'environments': [
+                    {
+                        'id': environment.id,
+                        'name': environment.name,
+                        'description': environment.description,
+                        'base_url': environment.base_url,
+                        'login_url': environment.login_url,
+                        'is_default': environment.is_default,
+                        'variables': [],
+                    }
+                    for environment in package.environments.all()
+                ],
+            }
+            for package in packages
+        ])
+
+
 class RoleViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
     queryset = Role.objects.prefetch_related('users').all()
     serializer_class = RoleSerializer
@@ -978,6 +1020,17 @@ class EnvironmentViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
             environment.is_default = True
             environment.save(update_fields=['is_default', 'updated_at'])
         return success(self.get_serializer(environment).data, '默认环境设置成功')
+
+
+class EnvironmentPackageViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
+    queryset = EnvironmentPackage.objects.prefetch_related('environments').all()
+    serializer_class = EnvironmentPackageSerializer
+    pagination_class = None
+    action_permissions = {'list':'environment.view','retrieve':'environment.view','create':'environment.manage','update':'environment.manage','partial_update':'environment.manage','destroy':'environment.manage'}
+
+    def perform_destroy(self, instance):
+        instance.environments.update(package=None)
+        instance.delete()
 
 
 class AutomationModuleViewSet(ActionPermissionMixin, viewsets.ReadOnlyModelViewSet):
