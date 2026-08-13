@@ -19,7 +19,7 @@ from .executor import api_request_executor
 from .interface_import import parse_fetch_text
 from .testcase.services import parse_xmind_package
 from .serializers import AutomationTaskSerializer, DataFactoryExecutionSerializer
-from .services import AUTOMATION_PLATFORM_URL, build_full_parameter_scenarios, build_parameter_variables, build_request_url, execute_task, replace_parameter_variables, resolve_full_custom_value, send_feishu_monitor_alarm, send_feishu_task_result
+from .services import AUTOMATION_PLATFORM_URL, build_full_parameter_scenarios, build_parameter_variables, build_request_url, execute_task, replace_parameter_variables, replace_response_variables, resolve_full_custom_value, send_feishu_monitor_alarm, send_feishu_task_result
 
 
 class FakeHttpResponse:
@@ -631,6 +631,17 @@ class PlatformApiTests(APITestCase):
         self.assertEqual(
             api_request_executor.get_request_params('POST', {'body': {'username': 'admin'}}),
             {'username': 'admin'},
+        )
+
+    def test_response_variable_replacement_supports_array_object_paths(self):
+        variables = {'lobbies': [{'id': 123, 'name': 'main'}]}
+        self.assertEqual(
+            replace_response_variables({'lobby_id': '${lobbies[0].id}'}, variables),
+            {'lobby_id': 123},
+        )
+        self.assertEqual(
+            replace_response_variables({'label': 'lobby=${lobbies[0].name}'}, variables),
+            {'label': 'lobby=main'},
         )
 
     def test_parameterized_request_values_are_generated_and_replaced(self):

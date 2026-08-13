@@ -198,7 +198,7 @@ def parse_fetch_text(text, module_name=''):
             'headers': _normalize_headers(options.get('headers', {})),
             'request_params': request_params,
             'parameterizations': [],
-            'assertions': {'status_code': 200, 'timeout_seconds': 3, 'json_path': 'code', 'expected_value': 0},
+            'assertions': {'status_code': 200, 'timeout_seconds': 20, 'json_path': 'code', 'expected_value': 0},
             'reference_enabled': False,
             'reference_interface': None,
             'response_extracts': [],

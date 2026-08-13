@@ -10,6 +10,7 @@ const router = createRouter({ history:createWebHistory(), routes:[
     {path:'automation',redirect:'/automation/execution'},
     {path:'automation/interface',name:'automation-interface',component:()=>import('./views/InterfaceView.vue'),meta:{title:'接口'}},
     {path:'automation/execution',name:'automation-execution',component:()=>import('./views/AutomationView.vue'),meta:{title:'执行'}},
+    {path:'automation/scene-packages',name:'automation-scene-packages',component:()=>import('./views/MonitorScenePackageView.vue'),meta:{title:'场景包'}},
     {path:'testcase',redirect:'/testcase/packages'},
     {path:'testcase/packages',name:'testcase-packages',component:()=>import('./views/TestCasePackageView.vue'),meta:{title:'用例包'}},
     {path:'testcase/packages/:id/edit',name:'testcase-package-editor',component:()=>import('./views/TestCasePackageEditor.vue'),meta:{title:'在线编辑用例包'}},
@@ -29,6 +30,7 @@ const dataFactoryPermissions=['data_factory.view','data_factory.account_add','da
 function canAccessPage(path:string){
   if(path==='/')return hasPermission('home.view')
   if(path.startsWith('/intelligence'))return dataFactoryPermissions.some(hasPermission)
+  if(path==='/automation/scene-packages')return hasPermission('automation.scene_package.view')
   if(path.startsWith('/automation'))return hasPermission('automation.view')
   if(path==='/testcase/packages'||path.startsWith('/testcase/packages/'))return path==='/testcase/packages/new/edit'?hasPermission('testcase.package.create'):hasPermission(path.endsWith('/edit')?'testcase.package.edit':'testcase.package.view')
   if(path==='/testcase/execution')return hasPermission('testcase.execution.view')
@@ -41,6 +43,7 @@ function firstAccessiblePath(){
     '/',
     '/intelligence/data-factory',
     '/automation/execution',
+    '/automation/scene-packages',
     '/testcase/packages',
     '/testcase/execution',
     '/monitor/interfaces',

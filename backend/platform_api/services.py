@@ -150,11 +150,37 @@ def replace_response_variables(value, variables):
         return [replace_response_variables(item, variables) for item in value]
     if not isinstance(value, str):
         return value
-    if value.startswith('${') and value.endswith('}') and value[2:-1] in variables:
-        return variables[value[2:-1]]
+    matches = list(CUSTOM_VALUE_PLACEHOLDER.finditer(value))
+    if not matches:
+        return value
+
+    # Preserve the original type when the placeholder occupies the whole
+    # value, while embedded placeholders are rendered as text.
+    if len(matches) == 1 and matches[0].span() == (0, len(value)):
+        match = matches[0]
+        try:
+            replacement, _ = _select_custom_variable_value(
+                match.group(1), match.group(2), variables,
+            )
+        except KeyError:
+            return value
+        return replacement
+
     rendered = value
-    for name, replacement in variables.items():
-        rendered = rendered.replace('${' + name + '}', str(replacement))
+    offset = 0
+    for match in matches:
+        try:
+            replacement, _ = _select_custom_variable_value(
+                match.group(1), match.group(2), variables,
+            )
+        except KeyError:
+            continue
+        start, end = match.span()
+        start += offset
+        end += offset
+        replacement_text = _stringify_custom_replacement(replacement)
+        rendered = rendered[:start] + replacement_text + rendered[end:]
+        offset += len(replacement_text) - (end - start)
     return rendered
 
 
@@ -206,9 +232,6 @@ def dependency_variable_block_message(interface, dependency_failures, extracted_
         return ''
     dependency_name = interface.reference_interface.name if interface.reference_interface_id else ''
     variable_names = '、'.join(used_names)
-    dependency_failure = dependency_failures.get(interface.reference_interface_id)
-    if dependency_failure:
-        return f'关联接口 {dependency_name or interface.reference_interface_id} 未通过，无法生成变量：{variable_names}。关联接口失败原因：{dependency_failure}'
     extracted_variables = extracted_variables_by_interface.get(interface.id, {})
     missing_names = [name for name in used_names if name not in extracted_variables]
     if missing_names:
@@ -458,7 +481,11 @@ def execute_task(
         interfaces = [target_interface]
         scenario_interface_ids = {target_interface.id} if task.task_type == 'scenario' else set()
     elif task.task_type == 'scenario':
-        interfaces = list(task.interfaces.filter(can_execute_in_task=True).order_by('id'))
+        interface_queryset = task.interfaces.filter(can_execute_in_task=True)
+        interface_map = {item.id: item for item in interface_queryset}
+        ordered_ids = [int(item) for item in (task.scene_interface_order or []) if str(item).isdigit()]
+        ordered_ids.extend(item.id for item in interface_queryset.order_by('id') if item.id not in ordered_ids)
+        interfaces = [interface_map[item_id] for item_id in ordered_ids if item_id in interface_map]
         interfaces = [item for item in interfaces if not api_request_executor.is_login_url(item.path, login_url)]
         scenario_interface_ids = {item.id for item in interfaces}
     else:
@@ -481,7 +508,7 @@ def execute_task(
         added_ids.add(interface.id)
         ordered_interfaces.append(interface)
 
-    for interface in sorted(interfaces, key=lambda item: item.id):
+    for interface in interfaces:
         add_with_dependencies(interface)
 
     response_variables = {}
@@ -580,6 +607,7 @@ def execute_task(
                         login_url=login_url,
                         access_token_prefix='',
                         access_token_header='x-token' if app == 'backend' else 'authorization',
+                        transport_timeout_seconds=20,
                     )
                 result.status = outcome.status
                 result.duration_ms = outcome.duration_ms
@@ -590,15 +618,18 @@ def execute_task(
                 access_token = outcome.access_token or access_token
                 if outcome.status == 'passed':
                     interface_passed = True
-                    # Extraction rules belong to the interfaces that consume this response.
+                else:
+                    interface_failure_messages.append(outcome.message)
+                # A response body can still provide dependency variables even
+                # when this interface failed an assertion (for example, it
+                # returned after the assertion threshold but before 20s).
+                if outcome.response_log:
                     for consumer in ordered_interfaces:
                         if consumer.reference_enabled and consumer.reference_interface_id == interface.id:
                             extracted_values = extract_response_variables(consumer, outcome.response_log)
                             if extracted_values:
                                 extracted_variables_by_interface.setdefault(consumer.id, {}).update(extracted_values)
                                 response_variables.update(extracted_values)
-                else:
-                    interface_failure_messages.append(outcome.message)
                 results.append(result)
             except ValueError as exc:
                 failure_message = str(exc)

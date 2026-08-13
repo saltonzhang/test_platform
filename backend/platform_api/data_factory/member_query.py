@@ -2,14 +2,16 @@ from ..common.database import query_one
 from .account_balance import DataFactoryError
 
 
-def query_member_by_email(search_term, *, environment_name=''):
+def query_member_by_email(search_term, *, environment_name='', database_profile=None):
     normalized_term = str(search_term or '').strip()
     if not normalized_term:
         raise DataFactoryError('请输入邮箱或昵称')
     try:
+        query_kwargs = {'profile': database_profile} if database_profile else {}
         row = query_one(
             'SELECT id, uuid, id_number, email, nickname FROM member WHERE email = %s OR nickname = %s LIMIT 1',
             (normalized_term.lower(), normalized_term),
+            **query_kwargs,
         )
     except Exception as exc:
         raise DataFactoryError(f'查询用户信息失败：{exc}') from exc

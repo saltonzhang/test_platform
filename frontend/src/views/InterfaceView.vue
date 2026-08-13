@@ -102,7 +102,7 @@ import { Plus, Upload } from '@element-plus/icons-vue'
 import type { ApiFullParameterization, ApiInterface, ApiParameterType, ApiParameterization, ApiResponseExtract, ApiTimeFormat } from '@/types'
 
 const defaultHeaders = { 'Content-Type': 'application/json; charset=utf-8', authorization: '' }
-const defaultAssertions = { status_code: 200, timeout_seconds: 3, json_path: 'code', expected_value: 0 }
+const defaultAssertions = { status_code: 200, timeout_seconds: 20, json_path: 'code', expected_value: 0 }
 const methods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']
 const parameterTypes:{label:string;value:ApiParameterType}[]=[{label:'人名',value:'name'},{label:'时间',value:'time'},{label:'地点',value:'location'},{label:'手机号',value:'phone'},{label:'身份证',value:'id_card'},{label:'邮箱',value:'email'},{label:'自定义',value:'custom'}]
 const timeFormats:{label:string;value:ApiTimeFormat}[]=[{label:'时间戳',value:'timestamp'},{label:'年月日时分秒',value:'datetime'},{label:'年月日',value:'date'},{label:'年月',value:'year_month'},{label:'月日',value:'month_day'},{label:'年份',value:'year'}]

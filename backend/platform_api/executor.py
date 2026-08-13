@@ -19,9 +19,10 @@ class ExecutionOutcome:
 class ApiRequestExecutor:
     """Shared HTTP execution pipeline used by task runs and single-item retries."""
 
-    def execute(self, *, url, method, headers, request_params, assertions=None, access_token='', login_url='', request_encoding='json', access_token_prefix='Bearer ', access_token_header=''):
+    def execute(self, *, url, method, headers, request_params, assertions=None, access_token='', login_url='', request_encoding='json', access_token_prefix='Bearer ', access_token_header='', transport_timeout_seconds=None):
         assertions = assertions or {}
-        timeout_seconds = assertions.get('timeout_seconds', 3)
+        assertion_timeout_seconds = assertions.get('timeout_seconds', 20)
+        request_timeout_seconds = assertion_timeout_seconds if transport_timeout_seconds is None else transport_timeout_seconds
         request_headers = dict(headers or {})
         if access_token and access_token_header:
             preferred = access_token_header.lower()
@@ -54,14 +55,14 @@ class ApiRequestExecutor:
 
         try:
             request = Request(url, data=payload, headers=request_headers, method=method)
-            with urlopen(request, timeout=timeout_seconds) as response:
+            with urlopen(request, timeout=request_timeout_seconds) as response:
                 body = response.read().decode('utf-8', errors='replace')
                 response_headers = getattr(response, 'headers', {}) or {}
                 passed, assertion_message = self.assert_response(response.status, body, assertions)
                 duration_ms = self.elapsed_ms(started_at)
-                if duration_ms > timeout_seconds * 1000:
+                if duration_ms > assertion_timeout_seconds * 1000:
                     passed = False
-                    assertion_message = f'耗时断言失败，实际 {duration_ms} ms，阈值 {timeout_seconds * 1000:g} ms'
+                    assertion_message = f'耗时断言失败，实际 {duration_ms} ms，阈值 {assertion_timeout_seconds * 1000:g} ms'
                 token = ''
                 if self.is_login_url(url, login_url) and passed:
                     token = self.extract_access_token(body)
@@ -83,10 +84,10 @@ class ApiRequestExecutor:
             body = exc.read().decode('utf-8', errors='replace')
             return ExecutionOutcome('failed', self.elapsed_ms(started_at), f'HTTP {exc.code}' + (f' · {body}' if body else ''), response_log=body)
         except TimeoutError:
-            return ExecutionOutcome('failed', self.elapsed_ms(started_at), f'接口执行超时，阈值 {timeout_seconds:g} 秒', response_log='请求超时，未收到响应')
+            return ExecutionOutcome('failed', self.elapsed_ms(started_at), f'接口执行超时，阈值 {request_timeout_seconds:g} 秒', response_log='请求超时，未收到响应')
         except URLError as exc:
             if isinstance(exc.reason, TimeoutError):
-                return ExecutionOutcome('failed', self.elapsed_ms(started_at), f'接口执行超时，阈值 {timeout_seconds:g} 秒', response_log='请求超时，未收到响应')
+                return ExecutionOutcome('failed', self.elapsed_ms(started_at), f'接口执行超时，阈值 {request_timeout_seconds:g} 秒', response_log='请求超时，未收到响应')
             return ExecutionOutcome('failed', self.elapsed_ms(started_at), f'请求失败：{exc}', response_log=str(exc))
         except OSError as exc:
             return ExecutionOutcome('failed', self.elapsed_ms(started_at), f'请求失败：{exc}', response_log=str(exc))

@@ -27,11 +27,11 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from .constants import BUSINESS_MODULE_NAMES
 from .data_factory import DataFactoryError, activate_member_status, bet_cancel, execute_account_add, execute_account_balance, push_order_result, query_member_by_email, rollback_bet_cancel, rollback_bet_settlement
 from .interface_import import InterfaceImportError, parse_fetch_text
-from .models import ApiInterface, AutomationModule, AutomationTask, AutomationTaskResult, DataFactoryExecution, Environment, EnvironmentPackage, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorTask, Role, User, UserEnvironmentAccount
+from .models import ApiInterface, AutomationModule, AutomationTask, AutomationTaskResult, DataFactoryExecution, Environment, EnvironmentPackage, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorScenePackage, MonitorTask, Role, User, UserEnvironmentAccount
 from .pagination import StandardPagination
 from .permissions import ActionPermissionMixin
 from .responses import success
-from .serializers import ApiInterfaceSerializer, AutomationModuleSerializer, AutomationTaskResultSerializer, AutomationTaskSerializer, DataFactoryExecutionSerializer, EnvironmentSerializer, EnvironmentPackageSerializer, MonitorAlarmSerializer, MonitorApiConfigSerializer, MonitorExecutionDetailSerializer, MonitorExecutionSerializer, MonitorTaskSerializer, PermissionSerializer, ResetPasswordSerializer, RoleSerializer, UserCreateSerializer, UserEnvironmentAccountUpdateSerializer, UserSerializer
+from .serializers import ApiInterfaceSerializer, AutomationModuleSerializer, AutomationTaskResultSerializer, AutomationTaskSerializer, DataFactoryExecutionSerializer, EnvironmentSerializer, EnvironmentPackageSerializer, MonitorAlarmSerializer, MonitorApiConfigSerializer, MonitorExecutionDetailSerializer, MonitorExecutionSerializer, MonitorScenePackageSerializer, MonitorTaskSerializer, PermissionSerializer, ResetPasswordSerializer, RoleSerializer, UserCreateSerializer, UserEnvironmentAccountUpdateSerializer, UserSerializer
 from .services import execute_monitor_task, execute_task, retry_monitor_detail, retry_task_result, sync_monitor_next_run_time
 
 
@@ -346,7 +346,8 @@ class DataFactoryAccountBalanceView(APIView):
         environment_id = backend_environments[0].id
         execution = DataFactoryExecution.objects.create(tool_name='账户余额', operator=request.user, environment_id=environment_id, email=email, amount=amount)
         try:
-            result = execute_account_balance(environment_id, email, amount)
+            profile_kwargs = {'database_profile': package.database_profile} if package.database_profile else {}
+            result = execute_account_balance(environment_id, email, amount, **profile_kwargs)
         except DataFactoryError as exc:
             execution.status = 'failed'
             execution.message = str(exc)
@@ -418,13 +419,15 @@ class DataFactoryAccountAddView(APIView):
             close_old_connections()
             execution_record = execution
             try:
+                profile_kwargs = {'database_profile': package.database_profile} if package.database_profile else {}
                 result = execute_account_add(
                     frontend_environment_id,
                     backend_environment_id,
                     email,
                     amount,
                     quantity,
-                    referral_code,
+                    referral_code=referral_code,
+                    **profile_kwargs,
                 )
                 generated_emails = [
                     str(item).strip().lower()
@@ -490,7 +493,8 @@ class DataFactoryMemberQueryView(APIView):
             tool_name='查询用户信息', operator=request.user, environment=environment, email=keyword, amount=0,
         )
         try:
-            result = query_member_by_email(keyword, environment_name=environment.name)
+            profile_kwargs = {'database_profile': package.database_profile} if package.database_profile else {}
+            result = query_member_by_email(keyword, environment_name=environment.name, **profile_kwargs)
         except DataFactoryError as exc:
             execution.status = 'failed'
             execution.message = str(exc)
@@ -530,7 +534,8 @@ class DataFactoryMemberStatusActivateView(APIView):
             amount=0,
         )
         try:
-            result = activate_member_status(email, environment_name=environment.name)
+            profile_kwargs = {'database_profile': package.database_profile} if package.database_profile else {}
+            result = activate_member_status(email, environment_name=environment.name, **profile_kwargs)
         except DataFactoryError as exc:
             execution.status = 'failed'
             execution.message = str(exc)
@@ -834,6 +839,7 @@ class DataFactoryEnvironmentPackageView(APIView):
                 'name': package.name,
                 'package_type': package.package_type,
                 'description': package.description,
+                'database_profile': package.database_profile,
                 'environments': [
                     {
                         'id': environment.id,
@@ -1311,6 +1317,96 @@ class MonitorApiConfigViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
         instance.enabled = self._coerce_bool(enabled, not instance.enabled)
         instance.save(update_fields=['enabled', 'updated_at'])
         return success(self.get_serializer(instance).data, '状态更新成功')
+
+
+class MonitorScenePackageViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
+    queryset = MonitorScenePackage.objects.select_related('created_by').prefetch_related('items__interface').all()
+    serializer_class = MonitorScenePackageSerializer
+    pagination_class = StandardPagination
+    action_permissions = {'list': 'automation.scene_package.view', 'retrieve': 'automation.scene_package.view', 'latest': 'automation.scene_package.view', 'history': 'automation.scene_package.view', 'create': 'automation.scene_package.manage', 'update': 'automation.scene_package.manage', 'partial_update': 'automation.scene_package.manage', 'destroy': 'automation.scene_package.manage', 'execute': 'automation.scene_package.manage'}
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        keyword = self.request.query_params.get('keyword', '').strip()
+        if keyword:
+            queryset = queryset.filter(Q(name__icontains=keyword) | Q(description__icontains=keyword))
+        return queryset
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        return success(self.get_serializer(serializer.instance).data, '场景创建成功', status.HTTP_201_CREATED)
+
+    def update(self, request, *args, **kwargs):
+        serializer = self.get_serializer(self.get_object(), data=request.data, partial=kwargs.get('partial', False))
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return success(self.get_serializer(serializer.instance).data, '场景更新成功')
+
+    def destroy(self, request, *args, **kwargs):
+        self.get_object().delete()
+        return success(message='场景删除成功')
+
+    @action(detail=True, methods=['get'])
+    def latest(self, request, pk=None):
+        package = self.get_object()
+        task = package.automation_tasks.select_related('environment', 'owner', 'scene_package').prefetch_related('modules', 'interfaces', 'execution_details').order_by('-created_at', '-id').first()
+        return success(AutomationTaskSerializer(task).data if task else None)
+
+    @action(detail=True, methods=['get'])
+    def history(self, request, pk=None):
+        package = self.get_object()
+        queryset = package.automation_tasks.select_related('environment', 'owner', 'scene_package').prefetch_related('modules', 'interfaces', 'execution_details').order_by('-created_at', '-id')
+        page = self.paginate_queryset(queryset)
+        serializer = AutomationTaskSerializer(page if page is not None else queryset, many=True)
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return success(serializer.data)
+
+    @action(detail=True, methods=['post'])
+    def execute(self, request, pk=None):
+        package = self.get_object()
+        login_password = str(request.data.get('login_password', '') or '').strip()
+        if not login_password:
+            raise ValidationError({'login_password': '请输入目标系统登录密码'})
+        package_items = list(package.items.select_related('interface').order_by('sort_order', 'id'))
+        interface_ids = [item.interface_id for item in package_items]
+        if not interface_ids:
+            raise ValidationError({'interface_ids': '场景包中暂无可执行接口'})
+        payload = {
+            'name': package.name,
+            'task_type': 'scenario',
+            'interface_ids': interface_ids,
+            'environment_package': request.data.get('environment_package'),
+            'status': 'pending',
+            'schedule': '手动执行',
+            'owner': request.user.id,
+        }
+        serializer = AutomationTaskSerializer(
+            data=payload,
+            context={'request': request, 'allow_scene_package_interfaces': True},
+        )
+        serializer.is_valid(raise_exception=True)
+        task = serializer.save()
+        task.scene_package = package
+        task.scene_interface_order = interface_ids
+        task.save(update_fields=['scene_package', 'scene_interface_order', 'updated_at'])
+        task_id = task.pk
+        operator = request.user
+
+        def execute_created_task():
+            close_old_connections()
+            try:
+                execute_task(AutomationTask.objects.get(pk=task_id), operator, login_password)
+            finally:
+                close_old_connections()
+
+        transaction.on_commit(lambda: threading.Thread(target=execute_created_task, daemon=True).start())
+        return success(AutomationTaskSerializer(task).data, '场景已创建，正在执行', status.HTTP_201_CREATED)
 
 
 class MonitorTaskViewSet(ActionPermissionMixin, viewsets.ModelViewSet):

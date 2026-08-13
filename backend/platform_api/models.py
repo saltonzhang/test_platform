@@ -48,6 +48,7 @@ class EnvironmentPackage(models.Model):
     name = models.CharField('环境包名称', max_length=100, unique=True)
     package_type = models.CharField('包类型', max_length=30, default='custom')
     description = models.TextField('描述', blank=True, default='')
+    database_profile = models.CharField('数据库配置标识', max_length=100, blank=True, default='')
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
     updated_at = models.DateTimeField('更新时间', auto_now=True)
 
@@ -206,6 +207,8 @@ class AutomationTask(models.Model):
     module = models.ForeignKey(AutomationModule, on_delete=models.PROTECT, null=True, blank=True, related_name='legacy_tasks', verbose_name='默认业务模块')
     modules = models.ManyToManyField(AutomationModule, related_name='tasks', blank=True, verbose_name='业务模块')
     interfaces = models.ManyToManyField(ApiInterface, related_name='automation_tasks', blank=True, verbose_name='场景测试接口')
+    scene_package = models.ForeignKey('MonitorScenePackage', on_delete=models.SET_NULL, null=True, blank=True, related_name='automation_tasks', verbose_name='来源场景包')
+    scene_interface_order = models.JSONField('场景接口执行顺序', default=list, blank=True)
     task_type = models.CharField('测试类型', max_length=20, choices=TYPE_CHOICES)
     environment = models.ForeignKey(Environment, on_delete=models.PROTECT, related_name='automation_tasks', verbose_name='运行环境')
     status = models.CharField('任务状态', max_length=20, choices=STATUS_CHOICES, default='pending')
@@ -286,6 +289,42 @@ class MonitorApiConfig(models.Model):
 
     def __str__(self):
         return f'{self.method} {self.path}'
+
+
+class MonitorScenePackage(models.Model):
+    name = models.CharField('场景名称', max_length=200, unique=True)
+    description = models.TextField('描述', blank=True, default='')
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='created_monitor_scene_packages', verbose_name='创建人')
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'aibet_monitor_scene_package'
+        db_table_comment = '监控中心场景包表'
+        ordering = ['-updated_at', '-id']
+
+    def __str__(self):
+        return self.name
+
+
+class MonitorScenePackageItem(models.Model):
+    scene_package = models.ForeignKey(MonitorScenePackage, on_delete=models.CASCADE, related_name='items', verbose_name='场景包')
+    interface = models.ForeignKey(ApiInterface, on_delete=models.CASCADE, related_name='monitor_scene_package_items', verbose_name='接口')
+    sort_order = models.PositiveIntegerField('执行顺序', default=0)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'aibet_monitor_scene_package_item'
+        db_table_comment = '监控中心场景包接口顺序表'
+        ordering = ['sort_order', 'id']
+        constraints = [
+            models.UniqueConstraint(fields=['scene_package', 'interface'], name='uniq_monitor_scene_package_interface'),
+            models.UniqueConstraint(fields=['scene_package', 'sort_order'], name='uniq_monitor_scene_package_order'),
+        ]
+
+    def __str__(self):
+        return f'{self.scene_package.name} - {self.interface.name}'
 
 
 class MonitorTask(models.Model):

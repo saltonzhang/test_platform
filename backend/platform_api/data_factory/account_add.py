@@ -1,7 +1,6 @@
 import json
 import secrets
 import time
-import uuid
 from datetime import timedelta
 from decimal import Decimal
 from urllib.parse import urlencode, urljoin, urlsplit
@@ -19,6 +18,10 @@ from .account_balance import DataFactoryError, execute_account_balance
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
+class DatabaseQueryError(DataFactoryError):
+    """Database configuration or query failures must stop account creation."""
+
+
 def _url(base_url, path, query=None):
     url = urljoin(f'{str(base_url).rstrip("/")}/', str(path).lstrip('/'))
     if query:
@@ -31,21 +34,23 @@ def _root_url(url):
     return f'{parsed.scheme}://{parsed.netloc}' if parsed.scheme and parsed.netloc else str(url).rstrip('/')
 
 
-def check_member_exists(email):
+def check_member_exists(email, *, database_profile=None):
     if not email:
         return None
     try:
-        row = query_one('SELECT id FROM member WHERE email = %s LIMIT 1', (email,))
+        query_kwargs = {'profile': database_profile} if database_profile else {}
+        row = query_one('SELECT id FROM member WHERE email = %s LIMIT 1', (email,), **query_kwargs)
         return row['id'] if row else None
     except Exception as exc:
-        raise DataFactoryError(f'查询账号是否存在时出错: {exc}') from exc
+        raise DatabaseQueryError(f'查询账号是否存在时出错: {exc}') from exc
 
 
-def query_kyc_info_from_db(email):
+def query_kyc_info_from_db(email, *, database_profile=None):
     member_id = None
     member_uuid = None
     try:
-        with DatabaseClient() as db:
+        client_kwargs = {'profile': database_profile} if database_profile else {}
+        with DatabaseClient(**client_kwargs) as db:
             member_row = db.query_one('SELECT id, uuid FROM member WHERE email = %s LIMIT 1', (email,))
             if not member_row:
                 print(f'❌ 数据库 member 表未查到账号: {email}')
@@ -83,10 +88,10 @@ def query_kyc_info_from_db(email):
         return member_id, member_uuid, serasa_validation_id, document_cpf
     except Exception as exc:
         print(f'❌ 数据库查询出错: {exc}')
-        return None, None, None, None
+        raise DatabaseQueryError(f'数据库查询失败: {exc}') from exc
 
 
-def mark_kyc_passed(member_id):
+def mark_kyc_passed(member_id, *, database_profile=None):
     member_id_value = str(member_id or '').strip()
     if not member_id_value:
         raise DataFactoryError('未能从数据库中找到 member_id')
@@ -98,7 +103,8 @@ def mark_kyc_passed(member_id):
         WHERE member_id = %s
     '''
     try:
-        with DatabaseClient() as db:
+        client_kwargs = {'profile': database_profile} if database_profile else {}
+        with DatabaseClient(**client_kwargs) as db:
             affected_rows = db.execute_write(sql, (member_id_value,))
         if not affected_rows:
             raise DataFactoryError(f'member_extra 未找到对应记录: member_id={member_id_value}')
@@ -107,7 +113,7 @@ def mark_kyc_passed(member_id):
     except DataFactoryError:
         raise
     except Exception as exc:
-        raise DataFactoryError(f'更新 member_extra KYC 状态失败: {exc}') from exc
+        raise DatabaseQueryError(f'更新 member_extra KYC 状态失败: {exc}') from exc
 
 
 # def get_brazil_id():
@@ -222,7 +228,7 @@ def extract_login_user_id(response_log, token):
     return extract_token_user_id(token)
 
 
-def get_kyc_url(environment, token, device_id=None):
+def get_kyc_url(environment, token):
     print('\n================ [获取 KYC URL 认证接口] ================')
     kyc_api_url = _url(getattr(environment, 'base_url', ''), '/api/v1/member/getKycUrl')
     current_ts = int(time.time())
@@ -237,7 +243,7 @@ def get_kyc_url(environment, token, device_id=None):
             'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36'
         ),
         'x-chan': '0',
-        'x-device-id': str(device_id or uuid.uuid4()),
+        'x-device-id': '18b225ed-c2e0-4fa3-b821-966271680942',
         'x-lang': 'en',
         'x-nonce': '4wMqKl',
         'x-platform': 'WEB',
@@ -458,10 +464,11 @@ def _build_account_add_result(frontend_environment, backend_environment, email, 
     }
 
 
-def _run_single_account(frontend_environment, backend_environment, email='', amount=5000, max_retries=60, referral_code=''):
+def _run_single_account(frontend_environment, backend_environment, email='', amount=5000, max_retries=60, database_profile=None, referral_code=''):
     email_clean = str(email or '').strip().lower()
     referral_code_clean = str(referral_code or '').strip()
     amount_value = _normalize_account_add_amount(amount)
+    profile_kwargs = {'database_profile': database_profile} if database_profile else {}
     base_url = getattr(frontend_environment, 'base_url', '')
     login_url = getattr(backend_environment, 'login_url', '')
     if not base_url:
@@ -469,13 +476,13 @@ def _run_single_account(frontend_environment, backend_environment, email='', amo
     if not login_url:
         raise DataFactoryError('请选择已配置后台登录地址的运行环境')
     if email_clean:
-        existing_member_id = check_member_exists(email_clean)
+        existing_member_id = check_member_exists(email_clean, **profile_kwargs)
         if existing_member_id:
             print(f'\n================ [检测到账号 {email_clean} 已存在] ================')
             balance_result = None
             if amount_value > 0:
                 print(f'🔍 Member ID: {existing_member_id}。直接跳过注册与 KYC 认证，调用账户余额工具充值...')
-                balance_result = execute_account_balance(backend_environment.id, email_clean, amount_value)
+                balance_result = execute_account_balance(backend_environment.id, email_clean, amount_value, **profile_kwargs)
             else:
                 print(f'🔍 Member ID: {existing_member_id}。未填写金额，跳过账户余额操作。')
             return _build_account_add_result(
@@ -493,8 +500,6 @@ def _run_single_account(frontend_environment, backend_environment, email='', amo
 
             current_ts = int(time.time())
             email_identifier = email_clean if email_clean else f'test{current_ts}@test.com'
-            # 每个压测账号必须具有独立设备标识；复用固定值会触发 Referral 的老用户/刷量判定。
-            device_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f'aibet-data-factory:{email_identifier}'))
             print(f'生成的 CPF (idNumber): {id_number}')
             print(f'使用的账号邮箱 (email/identifier): {email_identifier}')
 
@@ -509,7 +514,7 @@ def _run_single_account(frontend_environment, backend_environment, email='', amo
                     'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36'
                 ),
                 'x-chan': '0',
-                'x-device-id': device_id,
+                'x-device-id': '18b225ed-c2e0-4fa3-b821-966271680942',
                 'x-lang': 'en',
                 'x-nonce': 'hEIT38',
                 'x-platform': 'WEB',
@@ -573,27 +578,29 @@ def _run_single_account(frontend_environment, backend_environment, email='', amo
                 if not user_token:
                     continue
 
-            get_kyc_url(frontend_environment, user_token, device_id=device_id)
+            get_kyc_url(frontend_environment, user_token)
             print('\n⏳ 正在等待数据库写入 KYC 记录 (延时 2 秒)...')
             time.sleep(2)
 
-            member_id, member_uuid, protocol, document = query_kyc_info_from_db(email_identifier)
+            member_id, member_uuid, protocol, document = query_kyc_info_from_db(email_identifier, **profile_kwargs)
             if not member_id:
                 raise DataFactoryError('未能从数据库中找到 member_id')
             print(
                 f'🎯 查库解析成功!\n -> member_id: {member_id}\n -> user_id (uuid): {member_uuid}\n'
                 f' -> protocol (serasa_validation_id): {protocol}\n -> document (CPF): {document}'
             )
-            mark_kyc_passed(member_id)
+            mark_kyc_passed(member_id, **profile_kwargs)
             balance_result = None
             if amount_value > 0:
-                balance_result = execute_account_balance(backend_environment.id, email_identifier, amount_value)
+                balance_result = execute_account_balance(backend_environment.id, email_identifier, amount_value, **profile_kwargs)
             else:
                 print('未填写金额，跳过账户余额操作。')
             return _build_account_add_result(
                 frontend_environment, backend_environment, email_identifier, balance_result, member_id,
                 status='registered',
             )
+        except DatabaseQueryError:
+            raise
         except DataFactoryError as exc:
             last_error = exc
             print(f'❌ 运行过程中发生错误: {exc}')
@@ -604,7 +611,7 @@ def _run_single_account(frontend_environment, backend_environment, email='', amo
     raise DataFactoryError('注册与认证流程执行失败')
 
 
-def run_full_automation(frontend_environment, backend_environment, email='', amount=5000, max_retries=60, quantity=1, referral_code=''):
+def run_full_automation(frontend_environment, backend_environment, email='', amount=5000, max_retries=60, quantity=1, database_profile=None, referral_code=''):
     """按数量注册账号；每个账号内部仍使用 max_retries 重试注册流程。"""
     try:
         account_count = int(quantity)
@@ -625,6 +632,7 @@ def run_full_automation(frontend_environment, backend_environment, email='', amo
                 email=email,
                 amount=amount,
                 max_retries=max_retries,
+                database_profile=database_profile,
                 referral_code=referral_code,
             )
         )
@@ -640,7 +648,7 @@ def run_full_automation(frontend_environment, backend_environment, email='', amo
     return result
 
 
-def execute_account_add(frontend_environment_id, backend_environment_id, email, amount, quantity, referral_code=''):
+def execute_account_add(frontend_environment_id, backend_environment_id, email, amount, quantity, referral_code='', *, database_profile=None):
     amount_value = _normalize_account_add_amount(amount)
     frontend_environment = Environment.objects.filter(pk=frontend_environment_id).first()
     if not frontend_environment:
@@ -664,6 +672,7 @@ def execute_account_add(frontend_environment_id, backend_environment_id, email, 
         email=email,
         amount=amount_value,
         quantity=account_count,
+        database_profile=database_profile,
         referral_code=referral_code,
     )
     return {

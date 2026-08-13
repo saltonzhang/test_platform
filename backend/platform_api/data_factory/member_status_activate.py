@@ -2,19 +2,20 @@ from ..common.database import DatabaseClient
 from .account_balance import DataFactoryError
 
 
-def activate_member_status(email, *, environment_name=''):
+def activate_member_status(email, *, environment_name='', database_profile=None):
     email_value = str(email or '').strip().lower()
     if not email_value or '@' not in email_value:
         raise DataFactoryError('请输入有效邮箱')
 
     sql = '''
         UPDATE member_extra
-        SET last_active_time = NOW()
+        SET last_active_time = NOW(),kyc_status = 2, kyc_passed = 1, kyc_level = 2
         WHERE member_id = (SELECT id FROM member WHERE email = %s LIMIT 1)
     '''
 
     try:
-        with DatabaseClient() as db:
+        client_kwargs = {'profile': database_profile} if database_profile else {}
+        with DatabaseClient(**client_kwargs) as db:
             member = db.query_one('SELECT id FROM member WHERE email = %s LIMIT 1', (email_value,))
             if not member:
                 raise DataFactoryError(f'未找到邮箱对应的用户: {email_value}')

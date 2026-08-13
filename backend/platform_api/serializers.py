@@ -3,14 +3,16 @@ import re
 from urllib.parse import unquote
 
 from django.contrib.auth.password_validation import validate_password
+from django.db import transaction
 from rest_framework import serializers
 
 from .constants import BUSINESS_MODULE_NAMES
-from .models import ApiInterface, AutomationModule, AutomationTask, AutomationTaskResult, DataFactoryExecution, Environment, EnvironmentPackage, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorTask, Role, TestCasePackage, User
+from .models import ApiInterface, AutomationModule, AutomationTask, AutomationTaskResult, DataFactoryExecution, Environment, EnvironmentPackage, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorScenePackage, MonitorScenePackageItem, MonitorTask, Role, TestCasePackage, User
 
 ALLOWED_PERMISSIONS = {
     'home.view',
     'automation.view', 'automation.create', 'automation.run', 'automation.edit', 'automation.delete',
+    'automation.scene_package.view', 'automation.scene_package.manage',
     'testcase.package.view', 'testcase.package.create', 'testcase.package.edit', 'testcase.package.delete',
     'testcase.execution.view',
     'monitor.api.view', 'monitor.api.manage',
@@ -172,7 +174,7 @@ class EnvironmentPackageSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = EnvironmentPackage
-        fields = ['id', 'name', 'package_type', 'description', 'environments', 'created_at', 'updated_at']
+        fields = ['id', 'name', 'package_type', 'description', 'database_profile', 'environments', 'created_at', 'updated_at']
         read_only_fields = ['id', 'environments', 'created_at', 'updated_at']
 
     def validate_name(self, value):
@@ -184,6 +186,12 @@ class EnvironmentPackageSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('环境包名称已存在，请更换名称')
         if not value:
             raise serializers.ValidationError('请输入环境包名称')
+        return value
+
+    def validate_database_profile(self, value):
+        value = str(value or '').strip()
+        if value and not re.fullmatch(r'[A-Za-z0-9_-]+', value):
+            raise serializers.ValidationError('数据库配置标识只能包含字母、数字、下划线和短横线')
         return value
 
 
@@ -489,6 +497,82 @@ class MonitorApiConfigSerializer(serializers.ModelSerializer):
         return attrs
 
 
+class MonitorScenePackageItemSerializer(serializers.ModelSerializer):
+    interface_id = serializers.IntegerField(source='interface.id', read_only=True)
+    module_name = serializers.CharField(source='interface.module_name', read_only=True)
+    interface_name = serializers.CharField(source='interface.name', read_only=True)
+    method = serializers.CharField(source='interface.method', read_only=True)
+    path = serializers.CharField(source='interface.path', read_only=True)
+    request_params = serializers.JSONField(source='interface.request_params', read_only=True)
+
+    class Meta:
+        model = MonitorScenePackageItem
+        fields = ['interface_id', 'sort_order', 'module_name', 'interface_name', 'method', 'path', 'request_params']
+        read_only_fields = fields
+
+
+class MonitorScenePackageSerializer(serializers.ModelSerializer):
+    created_by_name = serializers.CharField(source='created_by.display_name', read_only=True)
+    interface_ids = serializers.PrimaryKeyRelatedField(
+        many=True,
+        queryset=ApiInterface.objects.filter(can_execute_in_task=True),
+        write_only=True,
+        required=False,
+        allow_empty=False,
+    )
+    items = MonitorScenePackageItemSerializer(many=True, read_only=True)
+    interface_count = serializers.IntegerField(source='items.count', read_only=True)
+
+    class Meta:
+        model = MonitorScenePackage
+        fields = ['id', 'name', 'description', 'interface_count', 'interface_ids', 'items', 'created_by', 'created_by_name', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'interface_count', 'items', 'created_by', 'created_by_name', 'created_at', 'updated_at']
+
+    def validate_name(self, value):
+        value = str(value).strip()
+        if not value:
+            raise serializers.ValidationError('请输入场景名称')
+        query = MonitorScenePackage.objects.filter(name=value)
+        if self.instance:
+            query = query.exclude(pk=self.instance.pk)
+        if query.exists():
+            raise serializers.ValidationError('场景名称已存在，请更换名称')
+        return value
+
+    def validate_interface_ids(self, value):
+        if len(value) != len({item.id for item in value}):
+            raise serializers.ValidationError('场景接口不能重复')
+        return value
+
+    def validate(self, attrs):
+        if not self.instance and not attrs.get('interface_ids'):
+            raise serializers.ValidationError({'interface_ids': '请选择至少一个接口'})
+        return attrs
+
+    @staticmethod
+    def _save_items(package, interfaces):
+        MonitorScenePackageItem.objects.bulk_create([
+            MonitorScenePackageItem(scene_package=package, interface=interface, sort_order=index)
+            for index, interface in enumerate(interfaces)
+        ])
+
+    def create(self, validated_data):
+        interfaces = validated_data.pop('interface_ids')
+        package = MonitorScenePackage.objects.create(**validated_data)
+        self._save_items(package, interfaces)
+        return package
+
+    def update(self, instance, validated_data):
+        interfaces = validated_data.pop('interface_ids', None)
+        if interfaces is None:
+            return super().update(instance, validated_data)
+        with transaction.atomic():
+            package = super().update(instance, validated_data)
+            package.items.all().delete()
+            self._save_items(package, interfaces)
+        return package
+
+
 class AutomationTaskResultSerializer(serializers.ModelSerializer):
     status_name = serializers.CharField(source='get_status_display', read_only=True)
 
@@ -521,6 +605,8 @@ class AutomationTaskSerializer(serializers.ModelSerializer):
     # are deliberately accepted as write-only input and never persisted.
     login_password = serializers.CharField(write_only=True, required=False, allow_blank=True, trim_whitespace=False)
     environment_package = serializers.PrimaryKeyRelatedField(queryset=EnvironmentPackage.objects.prefetch_related('environments'), write_only=True, required=False)
+    scene_package_id = serializers.IntegerField(source='scene_package.id', read_only=True)
+    scene_package_name = serializers.CharField(source='scene_package.name', read_only=True)
 
     def apply_environment_package(self, attrs, app):
         package = attrs.get('environment_package')
@@ -578,7 +664,7 @@ class AutomationTaskSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = AutomationTask
-        fields = ['id', 'name', 'module', 'module_ids', 'interface_ids', 'module_names', 'app', 'app_name', 'module_name', 'task_type', 'task_type_name', 'environment', 'environment_package', 'environment_name', 'status', 'status_name', 'schedule', 'owner', 'owner_name', 'notification_status', 'notification_message', 'notified_at', 'interface_count', 'failure_count', 'execution_details', 'login_password', 'created_at', 'updated_at']
+        fields = ['id', 'name', 'module', 'module_ids', 'interface_ids', 'module_names', 'app', 'app_name', 'module_name', 'task_type', 'task_type_name', 'scene_package_id', 'scene_package_name', 'environment', 'environment_package', 'environment_name', 'status', 'status_name', 'schedule', 'owner', 'owner_name', 'notification_status', 'notification_message', 'notified_at', 'interface_count', 'failure_count', 'execution_details', 'login_password', 'created_at', 'updated_at']
         read_only_fields = ['id', 'module_names', 'app', 'app_name', 'module_name', 'environment_name', 'owner_name', 'task_type_name', 'status_name', 'notification_status', 'notification_message', 'notified_at', 'interface_count', 'failure_count', 'execution_details', 'created_at', 'updated_at']
         extra_kwargs = {'environment': {'required': False}}
 
@@ -593,17 +679,18 @@ class AutomationTaskSerializer(serializers.ModelSerializer):
                 interfaces = list(self.instance.interfaces.all()) if self.instance else []
             if not interfaces:
                 raise serializers.ValidationError({'interface_ids': '请选择至少一个可执行接口'})
-            invalid_interfaces = [
-                item.name
-                for item in interfaces
-                if item.request_parameter_mode != 'full' or not item.full_parameterizations
-            ]
-            if invalid_interfaces:
-                names = '、'.join(invalid_interfaces[:3])
-                suffix = '等接口' if len(invalid_interfaces) > 3 else ''
-                raise serializers.ValidationError({
-                    'interface_ids': f'场景测试只能选择已配置全参数化参数的接口：{names}{suffix}'
-                })
+            if not self.context.get('allow_scene_package_interfaces'):
+                invalid_interfaces = [
+                    item.name
+                    for item in interfaces
+                    if item.request_parameter_mode != 'full' or not item.full_parameterizations
+                ]
+                if invalid_interfaces:
+                    names = '、'.join(invalid_interfaces[:3])
+                    suffix = '等接口' if len(invalid_interfaces) > 3 else ''
+                    raise serializers.ValidationError({
+                        'interface_ids': f'场景测试只能选择已配置全参数化参数的接口：{names}{suffix}'
+                    })
             module_names = {item.module_name for item in interfaces}
             interface_apps = {'backend' if name == '后台' else 'frontend' for name in module_names}
             if len(interface_apps) != 1:

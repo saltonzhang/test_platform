@@ -2,7 +2,7 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenRefreshView
 
-from .views import ApiInterfaceViewSet, AutomationModuleViewSet, AutomationTaskResultViewSet, AutomationTaskViewSet, DashboardView, DataFactoryAccountAddView, DataFactoryAccountBalanceView, DataFactoryBetCancelView, DataFactoryEnvironmentPackageView, DataFactoryEnvironmentView, DataFactoryExecutionView, DataFactoryMemberQueryView, DataFactoryMemberStatusActivateView, DataFactoryOrderResultPushView, DataFactoryRollbackBetCancelView, DataFactoryRollbackSettlementView, EnvironmentPackageViewSet, EnvironmentViewSet, LarkCallbackView, LarkLoginView, LoginView, MeEnvironmentAccountView, MeViewSet, MonitorAlarmViewSet, MonitorApiConfigViewSet, MonitorExecutionDetailViewSet, MonitorExecutionViewSet, MonitorTaskViewSet, RoleViewSet, UserViewSet
+from .views import ApiInterfaceViewSet, AutomationModuleViewSet, AutomationTaskResultViewSet, AutomationTaskViewSet, DashboardView, DataFactoryAccountAddView, DataFactoryAccountBalanceView, DataFactoryBetCancelView, DataFactoryEnvironmentPackageView, DataFactoryEnvironmentView, DataFactoryExecutionView, DataFactoryMemberQueryView, DataFactoryMemberStatusActivateView, DataFactoryOrderResultPushView, DataFactoryRollbackBetCancelView, DataFactoryRollbackSettlementView, EnvironmentPackageViewSet, EnvironmentViewSet, LarkCallbackView, LarkLoginView, LoginView, MeEnvironmentAccountView, MeViewSet, MonitorAlarmViewSet, MonitorApiConfigViewSet, MonitorExecutionDetailViewSet, MonitorExecutionViewSet, MonitorScenePackageViewSet, MonitorTaskViewSet, RoleViewSet, UserViewSet
 from .testcase.views import TestCasePackageViewSet
 
 router = DefaultRouter()
@@ -16,6 +16,7 @@ router.register('testcase/packages', TestCasePackageViewSet, basename='testcase-
 router.register('automation/tasks', AutomationTaskViewSet, basename='automation-task')
 router.register('automation/task-results', AutomationTaskResultViewSet, basename='automation-task-result')
 router.register('monitor/interfaces', MonitorApiConfigViewSet, basename='monitor-interface')
+router.register('monitor/scene-packages', MonitorScenePackageViewSet, basename='monitor-scene-package')
 router.register('monitor/tasks', MonitorTaskViewSet, basename='monitor-task')
 router.register('monitor/executions', MonitorExecutionViewSet, basename='monitor-execution')
 router.register('monitor/execution-details', MonitorExecutionDetailViewSet, basename='monitor-execution-detail')

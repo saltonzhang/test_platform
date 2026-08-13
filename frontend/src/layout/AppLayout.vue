@@ -11,12 +11,13 @@
             <router-link to="/intelligence/data-factory"><span>数据工厂</span></router-link>
           </div>
         </div>
-        <div v-if="hasPermission('automation.view')" :class="['nav-group',{open:expandedGroups.automation}]">
+        <div v-if="hasAnyPermission(['automation.view','automation.scene_package.view'])" :class="['nav-group',{open:expandedGroups.automation}]">
           <button class="nav-parent" :class="{active:route.path.startsWith('/automation')}" type="button" :aria-expanded="expandedGroups.automation" aria-controls="automation-menu" @click="toggleGroup('automation')"><el-icon><Calendar /></el-icon><span>自动化</span><el-icon class="nav-arrow"><ArrowRight /></el-icon></button>
           <div id="automation-menu" class="nav-children">
             <strong class="nav-flyout-title">自动化</strong>
             <router-link to="/automation/interface"><span>接口</span></router-link>
             <router-link to="/automation/execution"><span>执行</span></router-link>
+            <router-link v-if="hasPermission('automation.scene_package.view')" to="/automation/scene-packages"><span>场景包</span></router-link>
           </div>
         </div>
         <div v-if="hasAnyPermission(['monitor.api.view','monitor.task.view','monitor.alarm.view'])" :class="['nav-group',{open:expandedGroups.monitor}]">
@@ -55,7 +56,7 @@ import { computed,reactive,ref,watch } from 'vue'; import { useRoute,useRouter }
 type NavGroup='intelligence'|'automation'|'testcase'|'monitor'|'settings'
 const route=useRoute(),router=useRouter(),collapsed=ref(false),environmentAccountVisible=ref(false)
 const expandedGroups=reactive<Record<NavGroup,boolean>>({intelligence:route.path.startsWith('/intelligence'),automation:route.path.startsWith('/automation'),testcase:route.path.startsWith('/testcase'),monitor:route.path.startsWith('/monitor'),settings:route.path.startsWith('/settings')})
-const breadcrumb=computed(()=>route.path==='/intelligence/data-factory'?'智能工具 / 数据工厂':route.path==='/automation/interface'?'自动化 / 接口':route.path==='/automation/execution'?'自动化 / 执行':route.path==='/testcase/packages'?'用例管理 / 用例包':route.path.startsWith('/testcase/packages/')?'用例管理 / 用例包 / 在线编辑':route.path==='/testcase/execution'?'用例管理 / 用例执行':route.path==='/monitor/interfaces'?'监控中心 / 任务包':route.path==='/monitor/tasks'?'监控中心 / 任务管理':route.path==='/monitor/alarms'?'监控中心 / 告警记录':route.path==='/settings/environment'?'配置 / 环境配置':route.path==='/settings/users'?'配置 / 用户管理':route.path==='/settings/roles'?'配置 / 角色管理':'首页')
+const breadcrumb=computed(()=>route.path==='/intelligence/data-factory'?'智能工具 / 数据工厂':route.path==='/automation/interface'?'自动化 / 接口':route.path==='/automation/execution'?'自动化 / 执行':route.path==='/automation/scene-packages'?'自动化 / 场景包':route.path==='/testcase/packages'?'用例管理 / 用例包':route.path.startsWith('/testcase/packages/')?'用例管理 / 用例包 / 在线编辑':route.path==='/testcase/execution'?'用例管理 / 用例执行':route.path==='/monitor/interfaces'?'监控中心 / 任务包':route.path==='/monitor/tasks'?'监控中心 / 任务管理':route.path==='/monitor/alarms'?'监控中心 / 告警记录':route.path==='/settings/environment'?'配置 / 环境配置':route.path==='/settings/users'?'配置 / 用户管理':route.path==='/settings/roles'?'配置 / 角色管理':'首页')
 function groupForPath(path:string):NavGroup|undefined{return path.startsWith('/intelligence')?'intelligence':path.startsWith('/automation')?'automation':path.startsWith('/testcase')?'testcase':path.startsWith('/monitor')?'monitor':path.startsWith('/settings')?'settings':undefined}
 function hasAnyPermission(codes:string[]){return codes.some(hasPermission)}
 function toggleGroup(group:NavGroup){if(collapsed.value){collapsed.value=false;expandedGroups[group]=true;return}expandedGroups[group]=!expandedGroups[group]}

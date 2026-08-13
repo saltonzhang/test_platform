@@ -1,7 +1,7 @@
 import axios from 'axios'
 import { clearAuth, auth } from './auth'
 import router from './router'
-import type { AccountAddResult, AccountBalanceResult, ApiInterface, ApiResponse, AutomationModule, AutomationTask, AutomationTaskResult, DashboardStats, DataFactoryExecution, Environment, EnvironmentAccountSettings, EnvironmentPackage, LoginResult, MemberQueryResult, MemberStatusActivateResult, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorTask, OrderResultPushResult, PageResult, Role, TestCasePackage, User } from './types'
+import type { AccountAddResult, AccountBalanceResult, ApiInterface, ApiResponse, AutomationModule, AutomationTask, AutomationTaskResult, DashboardStats, DataFactoryExecution, Environment, EnvironmentAccountSettings, EnvironmentPackage, LoginResult, MemberQueryResult, MemberStatusActivateResult, MonitorAlarm, MonitorApiConfig, MonitorExecution, MonitorExecutionDetail, MonitorScenePackage, MonitorTask, OrderResultPushResult, PageResult, Role, TestCasePackage, User } from './types'
 
 const request = axios.create({ baseURL:'/api', timeout:15000 })
 request.interceptors.request.use(config => { if (auth.token) config.headers.Authorization = `Bearer ${auth.token}`; return config })
@@ -71,6 +71,13 @@ export const createMonitorInterface = (data:Record<string,unknown>) => request.p
 export const updateMonitorInterface = (id:number,data:Record<string,unknown>) => request.patch<never,ApiResponse<MonitorApiConfig>>(`/monitor/interfaces/${id}/`,data)
 export const deleteMonitorInterface = (id:number) => request.delete<never,ApiResponse<null>>(`/monitor/interfaces/${id}/`)
 export const toggleMonitorInterface = (id:number,enabled:boolean) => request.post<never,ApiResponse<MonitorApiConfig>>(`/monitor/interfaces/${id}/toggle/`,{enabled})
+export const getMonitorScenePackages = (params:Record<string,unknown>={}) => request.get<never,ApiResponse<PageResult<MonitorScenePackage>>>('/monitor/scene-packages/',{params})
+export const createMonitorScenePackage = (data:{name:string;description:string;interface_ids:number[]}) => request.post<never,ApiResponse<MonitorScenePackage>>('/monitor/scene-packages/',data)
+export const updateMonitorScenePackage = (id:number,data:{name:string;description:string;interface_ids:number[]}) => request.patch<never,ApiResponse<MonitorScenePackage>>(`/monitor/scene-packages/${id}/`,data)
+export const deleteMonitorScenePackage = (id:number) => request.delete<never,ApiResponse<null>>(`/monitor/scene-packages/${id}/`)
+export const executeMonitorScenePackage = (id:number, data:{environment_package:number;login_password:string}) => request.post<never,ApiResponse<AutomationTask>>(`/monitor/scene-packages/${id}/execute/`, data)
+export const getMonitorScenePackageLatest = (id:number) => request.get<never,ApiResponse<AutomationTask|null>>(`/monitor/scene-packages/${id}/latest/`)
+export const getMonitorScenePackageHistory = (id:number, params:Record<string,unknown>={}) => request.get<never,ApiResponse<PageResult<AutomationTask>>>(`/monitor/scene-packages/${id}/history/`, {params})
 export const getMonitorTasks = (params:Record<string,unknown>={}) => request.get<never,ApiResponse<PageResult<MonitorTask>>>('/monitor/tasks/',{params})
 export const createMonitorTask = (data:Record<string,unknown>) => request.post<never,ApiResponse<MonitorTask>>('/monitor/tasks/',data)
 export const updateMonitorTask = (id:number,data:Record<string,unknown>) => request.patch<never,ApiResponse<MonitorTask>>(`/monitor/tasks/${id}/`,data)

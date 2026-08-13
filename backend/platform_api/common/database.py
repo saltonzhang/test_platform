@@ -81,10 +81,23 @@ def _db_env_prefix(profile=None):
     profile_name = _normalize_db_profile(profile)
     if profile_name is None:
         return _DB_ENV_PREFIX
-    token = re.sub(r'[^0-9A-Za-z]+', '_', profile_name).strip('_').upper()
+    raw_token = re.sub(r'[^0-9A-Za-z]+', '_', profile_name).strip('_').upper()
+    if raw_token.startswith('DATA_') and raw_token.endswith('_DB'):
+        return raw_token
+    token = raw_token
     if not token:
         raise ValueError('DATA_FACTORY_DB_PROFILE 不能为空')
-    return f'{_DB_ENV_PREFIX}_{token}'
+    canonical_prefix = f'{_DB_ENV_PREFIX}_{token}'
+    legacy_prefix = f'DATA_{token}_DB'
+    # Support existing DATA_<PROFILE>_DB_* groups while keeping the newer
+    # DATA_FACTORY_DB_<PROFILE>_* naming convention. Prefer the group that
+    # actually exists so a package marker can be either FACTEST or the full
+    # DATA_FACTEST_DB prefix.
+    if os.getenv(f'{canonical_prefix}_HOST') not in (None, ''):
+        return canonical_prefix
+    if os.getenv(f'{legacy_prefix}_HOST') not in (None, ''):
+        return legacy_prefix
+    return canonical_prefix
 
 
 def _get_env_database_value(field, profile=None):

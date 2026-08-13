@@ -79,7 +79,7 @@ def get_data_factory_credentials(environment_type):
     return account, password
 
 
-def execute_account_balance(environment_id, email, amount):
+def execute_account_balance(environment_id, email, amount, *, database_profile=None):
     environment = Environment.objects.filter(pk=environment_id).first()
     if not environment or not environment.login_url:
         raise DataFactoryError('请选择已配置后台登录地址的运行环境')
